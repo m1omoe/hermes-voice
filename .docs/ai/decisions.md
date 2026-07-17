@@ -198,3 +198,13 @@
 
 **Rationale**: User decision (2026-07-15). Active-only preserves the explicit-switching philosophy and the no-backend-change constraint using the existing `/api/devices` unregister endpoint; multi-backend identity is deliberately queued as a v2 backlog item rather than scope-creeping v1.
 
+## [2026-07-16] Self-serve server setup uses a local harness, portable provisioner, and one-time QR pairing
+
+**Context**: A fresh Mac can have Hermes running while Harness Voice remains unreachable: the app only connects to an existing backend, and the committed launchd template embeds one maintainer's checkout path, home directory, and Tailscale certificate host. Copying a long-lived backend token through a QR code or prompt would also make setup convenient at the cost of a durable credential leak.
+
+**Decision**: The iPhone copies a non-secret prompt for a coding harness running locally on the target Mac. The harness invokes a first-party macOS/Tailscale provisioner that generates portable launchd configuration, stores the backend token in macOS Keychain, verifies HTTPS, and renders a QR code containing only a short-lived, single-use pairing credential. The app claims that credential over HTTPS and receives the normal token only in the response. Public setup generates a per-server token; a BWS bootstrap is optional for personal machines.
+
+**Alternatives considered**: (a) README/prompt-only setup with manual URL/token copy — simple but preserves the failure mode. (b) QR containing the long-lived token — simple and offline but exposes a durable credential to any scanner/photo. (c) App-directed remote installation — smoothest apparent UX but requires a new privileged control channel and broad remote-machine permissions.
+
+**Rationale**: A local harness already has the user's terminal context and can request macOS/Tailscale approvals naturally; the app needs no remote-control trust channel. The provisioner removes machine-specific deployment drift, while a one-time TLS claim delivers the QR UX without treating the barcode as a permanent password. Keychain storage avoids introducing a tracked or plaintext dotenv flow; BWS remains an optional shortcut, not a public-user prerequisite. Full design: `docs/superpowers/specs/2026-07-16-self-serve-server-setup-design.md`.
+
