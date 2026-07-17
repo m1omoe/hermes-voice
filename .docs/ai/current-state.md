@@ -2,6 +2,17 @@
 
 > Updated at the end of every work session. Read this first.
 
+## Plan
+
+- [ ] Pairing ticket store + claim API. Verify: `uv run --directory backend pytest tests/test_pairing.py -v`
+- [ ] Portable launchd renderer. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v`
+- [ ] Guided provisioner + terminal QR. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v`
+- [ ] iOS pairing payload + claim client. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:HermesVoiceTests/ServerPairingTests test`
+- [ ] iOS QR scanner/setup sheet. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:HermesVoiceTests/ServerPairingTests test`
+- [ ] Wire onboarding + server manager. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
+- [ ] Docs + full automated regression. Verify: `uv run --directory backend pytest` and `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
+- [ ] Mandalore physical setup/pair/replay acceptance. Verify: named human check
+
 ## Server profiles — MERGED to main (2026-07-16); on-device acceptance pending
 
 Two-laptop backend switching SHIPPED in code: `BackendProfile` persistence + one-time legacy migration; main-header picker; Settings server manager/editor (authenticated `/api/harnesses` save-gate — unauthenticated `/health` can't validate tokens); profile-scoped Watch (`(sessionId, profileId)` pair marker) + Siri (profileID-guarded session, harness routing) continuity; active-only APNs handoff with per-backend registration records (decision: `decisions.md [2026-07-15]`). Branch `server-profiles` (`d4b8035..ce3f5e1`, 9 commits) merged; 71 tests + build green on merged main. Executed via subagent-driven development off `docs/superpowers/plans/2026-07-10-server-profiles.md` with Lead-revised Task 2-4 briefs; GPT-5.6 Sol adversarial-reviewed plan AND branch (4 convergence rounds → MERGE); full trail: `.superpowers/sdd/progress.md` (git-ignored).
