@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field  # noqa: F401  (Field used below)
+from pydantic import BaseModel, Field
 
 
 class TurnAnswer(BaseModel):
@@ -181,3 +181,39 @@ class DeviceResponse(BaseModel):
     environment: str
     registered_at: float
     last_seen_at: float
+
+
+# ───── Pairing (one-time ticket claim) ─────
+
+
+class PairingClaimRequest(BaseModel):
+    """Body of POST /api/pairings/claim.
+
+    The pairing id and secret are both base64url-shaped, high-entropy
+    strings produced by `app.pairing`. Pydantic's pattern + length bounds
+    catch obviously-malformed bodies (422) so the store's claim() never
+    has to deal with garbage — and a successful shape match still goes
+    through the store's atomic claim, which decides success or 404."""
+
+    pairing_id: str = Field(
+        ...,
+        min_length=16,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    secret: str = Field(
+        ...,
+        min_length=32,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
+class PairingClaimResponse(BaseModel):
+    """Successful claim: returns the configured long-lived backend token.
+
+    The token is the same one the iOS app would normally configure
+    manually; pairing is just a safer, one-time mechanism to deliver it
+    over HTTPS rather than copy-paste."""
+
+    token: str

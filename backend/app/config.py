@@ -43,6 +43,18 @@ class Settings:
     ssl_certfile: str = ""
     ssl_keyfile: str = ""
 
+    @property
+    def pairing_enabled(self) -> bool:
+        """True when the server is configured to accept pairing claims.
+
+        All three of (a) a non-empty auth token to surrender, (b) TLS
+        certificate, and (c) TLS key must be present. Pairing is the
+        one route that bypasses the auth-token check, so it MUST be
+        guarded by a token requirement at startup — otherwise a plain
+        HTTP-only deployment could be tricked into giving the token to
+        any unauthenticated caller."""
+        return bool(self.auth_token and self.ssl_certfile and self.ssl_keyfile)
+
     # Bonjour/mDNS LAN advertisement (zero-config discovery by the iOS app).
     bonjour_enabled: bool = True
     # Canonical host to advertise in the Bonjour TXT record (e.g. a Tailscale

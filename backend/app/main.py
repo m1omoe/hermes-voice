@@ -22,7 +22,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, StreamingResponse
 
-from . import mdns, schedules
+from . import mdns, pairing, schedules
 from .approvals import ApprovalBroker
 from .audio_store import AudioStore
 from .config import Settings, get_settings
@@ -43,6 +43,8 @@ from .models import (
     HealthResponse,
     HistoryMessage,
     HistoryToolCall,
+    PairingClaimRequest,
+    PairingClaimResponse,
     ReplayRequest,
     ReplayResponse,
     ScheduleCreateRequest,
@@ -127,6 +129,11 @@ def create_app(
     # CRUD endpoints work even before lifespan fires (TestClient doesn't run
     # lifespan unless used as a context manager).
     schedules._init_sync()
+    # Same eager-init pattern for the pairing store: a fresh claim must work
+    # the first time the iOS app hits the route, even on a cold-started
+    # process before the lifespan event loop has started.
+    pairing_store = pairing.PairingStore()
+    pairing_store.prune_expired()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -219,6 +226,10 @@ def create_app(
     app.state.store = store
     app.state.http_client = http_client
     app.state.auto_mock = auto_mock
+    # Pairing ticket store: short-lived, single-use credentials exchanged
+    # over HTTPS to bootstrap a new device. See app/pairing.py for the
+    # threat model.
+    app.state.pairings = pairing_store
 
     _register_routes(app)
     return app
@@ -598,6 +609,36 @@ def _register_routes(app: FastAPI) -> None:
             session_id=str(result.get("session_id") or session_id),
         )
 
+    @app.post("/api/pairings/claim", response_model=PairingClaimResponse)
+    async def claim_pairing(body: PairingClaimRequest) -> PairingClaimResponse:
+        """One-time pairing ticket claim (unauthenticated by design).
+
+        The iOS app posts the QR-encoded pairing_id + secret and gets
+        back the configured backend token, then saves it as a server
+        profile. This is the ONLY endpoint that intentionally bypasses
+        `_require_token` — the whole point of pairing is to deliver the
+        token to a device that doesn't have it yet.
+
+        The route is gated by `settings.pairing_enabled` (auth_token +
+        cert + key all present) so a plain-HTTP deployment can never
+        surrender the token. Every unknown/expired/replayed/wrong-secret
+        claim returns the SAME 404 body — leaking which case it is
+        would help an attacker iterate."""
+        settings: Settings = app.state.settings
+        if not settings.pairing_enabled:
+            raise HTTPException(
+                status_code=404, detail="pairing code unavailable",
+            )
+        store_obj: pairing.PairingStore = app.state.pairings
+        claimed = await asyncio.to_thread(
+            store_obj.claim, body.pairing_id, body.secret
+        )
+        if not claimed:
+            raise HTTPException(
+                status_code=404, detail="pairing code unavailable",
+            )
+        return PairingClaimResponse(token=settings.auth_token)
+
     @app.post(
         "/api/turns/{turn_id}/answer",
         dependencies=[Depends(_require_token)],
@@ -610,7 +651,6 @@ def _register_routes(app: FastAPI) -> None:
         if not ok:
             raise HTTPException(status_code=404, detail="no such pending request")
         return {"ok": True}
-
     @app.get(
         "/api/schedules",
         response_model=list[ScheduleResponse],

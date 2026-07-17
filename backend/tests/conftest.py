@@ -6,10 +6,12 @@ hit network or the real hermes binary.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import pairing
 from app.audio_store import AudioStore
 from app.config import reset_settings_cache
 from app.hermes import HermesClient, HermesReply, StreamReply, StreamTool
@@ -71,15 +73,17 @@ class FakeTTS:
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch, tmp_path: Path):
     """Strip env so tests run deterministically regardless of host config."""
     for var in (
         "HERMES_VOICE_MOCK", "HERMES_VOICE_TOKEN",
+        "HERMES_VOICE_CERT", "HERMES_VOICE_KEY",
         "OPENAI_API_KEY", "VOICE_TOOLS_OPENAI_KEY", "GROQ_API_KEY",
         "ELEVENLABS_API_KEY", "STT_PROVIDER", "TTS_PROVIDER",
         "PIPER_VOICE_PATH", "HERMES_EXTRA_ARGS",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(pairing, "DEFAULT_DB_PATH", tmp_path / "pairings.db")
     reset_settings_cache()
     yield
     reset_settings_cache()
