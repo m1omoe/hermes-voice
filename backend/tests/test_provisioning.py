@@ -64,7 +64,8 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
 
     assert 'security find-generic-password -a "$USER" -s custom-service -w' in rendered
     assert 'HERMES_VOICE_TOKEN="$TOKEN"' in rendered
-    assert "exec env" in rendered
+    assert "exec env" not in rendered
+    assert "exec \\\n    HERMES_VOICE_HOST=\"0.0.0.0\"" in rendered
     assert f"{layout.uv} run --directory {layout.repo_root / 'backend'} python -m app" in rendered
     assert 'HERMES_VOICE_HOST="0.0.0.0"' in rendered
     assert f"HERMES_VOICE_PUBLIC_HOST={shlex.quote(layout.dns_name)}" in rendered
@@ -98,8 +99,25 @@ def test_renew_script_renews_and_restarts_generated_backend(tmp_path: Path) -> N
     assert 'cp "$TAILSCALE_CERT_DIR/$DNS_NAME.key" "$DEST_DIR/server.key"' in rendered
     assert 'chmod 644 "$DEST_DIR/server.crt"' in rendered
     assert 'chmod 600 "$DEST_DIR/server.key"' in rendered
-    assert f'launchctl kickstart -k "gui/$(id -u)/{layout.backend_label}"' in rendered
+    assert 'launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"' in rendered
     assert layout.renew_label not in rendered
+
+
+def test_renew_script_quotes_custom_backend_label_without_literal_quotes(tmp_path: Path) -> None:
+    layout = MacServerLayout(
+        repo_root=tmp_path / "checkout",
+        home=tmp_path / "home",
+        uv=Path("/opt/custom/bin/uv"),
+        dns_name="mandalore.tailnet.ts.net",
+        support_dir=tmp_path / "Library/Application Support/Harness Voice",
+        backend_label="custom.backend label",
+    )
+
+    rendered = render_renew_script(layout)
+
+    assert f"BACKEND_LABEL={shlex.quote(layout.backend_label)}" in rendered
+    assert 'launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"' in rendered
+    assert f"/$(id -u)/{shlex.quote(layout.backend_label)}" not in rendered
 
 
 def test_renew_plist_points_at_script_and_uses_renew_label(tmp_path: Path) -> None:

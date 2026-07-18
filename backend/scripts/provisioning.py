@@ -43,7 +43,7 @@ if [[ -z "$TOKEN" ]]; then
     exit 1
 fi
 
-exec env \\
+exec \\
     HERMES_VOICE_HOST="0.0.0.0" \\
     HERMES_VOICE_CERT={cert_path} \\
     HERMES_VOICE_KEY={key_path} \\
@@ -96,6 +96,7 @@ def render_renew_script(layout: MacServerLayout) -> str:
     tailscale = shlex.quote(tailscale)
     tailscale_cert_dir = shlex.quote(str(tailscale_cert_dir))
     support_dir = shlex.quote(str(layout.support_dir))
+    backend_label = shlex.quote(layout.backend_label)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -103,6 +104,7 @@ DNS_NAME={domain}
 TAILSCALE={tailscale}
 TAILSCALE_CERT_DIR={tailscale_cert_dir}
 DEST_DIR={support_dir}
+BACKEND_LABEL={backend_label}
 
 "$TAILSCALE" cert "$DNS_NAME"
 mkdir -p "$DEST_DIR"
@@ -110,5 +112,5 @@ cp "$TAILSCALE_CERT_DIR/$DNS_NAME.crt" "$DEST_DIR/server.crt"
 cp "$TAILSCALE_CERT_DIR/$DNS_NAME.key" "$DEST_DIR/server.key"
 chmod 644 "$DEST_DIR/server.crt"
 chmod 600 "$DEST_DIR/server.key"
-launchctl kickstart -k "gui/$(id -u)/{shlex.quote(layout.backend_label)}"
+launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"
 """
