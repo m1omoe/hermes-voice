@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import plistlib
 import shlex
+import subprocess
 from pathlib import Path
 
 from scripts.provisioning import (
@@ -65,14 +66,41 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
     assert 'security find-generic-password -a "$USER" -s custom-service -w' in rendered
     assert 'HERMES_VOICE_TOKEN="$TOKEN"' in rendered
     assert "exec env" not in rendered
-    assert "exec \\\n    HERMES_VOICE_HOST=\"0.0.0.0\"" in rendered
-    assert f"{layout.uv} run --directory {layout.repo_root / 'backend'} python -m app" in rendered
+    assert f"UV={shlex.quote(str(layout.uv))}" in rendered
+    assert f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app' in rendered
     assert 'HERMES_VOICE_HOST="0.0.0.0"' in rendered
     assert f"HERMES_VOICE_PUBLIC_HOST={shlex.quote(layout.dns_name)}" in rendered
     assert 'echo "$TOKEN"' not in rendered
     assert "export HERMES_VOICE_TOKEN=" not in rendered
     assert "if [[ -z \"$TOKEN\" ]]" in rendered
     assert "exit 1" in rendered
+
+
+def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
+    tmp_path: Path,
+) -> None:
+    layout = make_layout(tmp_path)
+
+    rendered = render_backend_wrapper(layout, "custom-service")
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=rendered,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert syntax.returncode == 0, syntax.stderr
+    lines = rendered.splitlines()
+    exec_index = next(i for i, line in enumerate(lines) if line.startswith('exec "$UV" run'))
+    assignment_indices = [
+        i for i, line in enumerate(lines) if line.startswith("HERMES_VOICE_")
+    ]
+    assert assignment_indices
+    assert max(assignment_indices) < exec_index
+    assert lines[exec_index] == (
+        f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app'
+    )
 
 
 def test_backend_wrapper_uses_shared_generated_certificate_paths(tmp_path: Path) -> None:

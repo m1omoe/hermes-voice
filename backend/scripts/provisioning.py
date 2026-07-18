@@ -43,13 +43,13 @@ if [[ -z "$TOKEN" ]]; then
     exit 1
 fi
 
-exec \\
-    HERMES_VOICE_HOST="0.0.0.0" \\
-    HERMES_VOICE_CERT={cert_path} \\
-    HERMES_VOICE_KEY={key_path} \\
-    HERMES_VOICE_PUBLIC_HOST={public_host} \\
-    HERMES_VOICE_TOKEN="$TOKEN" \\
-    {uv_path} run --directory {backend_dir} python -m app
+UV={uv_path}
+HERMES_VOICE_HOST="0.0.0.0" \\
+HERMES_VOICE_CERT={cert_path} \\
+HERMES_VOICE_KEY={key_path} \\
+HERMES_VOICE_PUBLIC_HOST={public_host} \\
+HERMES_VOICE_TOKEN="$TOKEN" \\
+exec "$UV" run --directory {backend_dir} python -m app
 """
 
 
