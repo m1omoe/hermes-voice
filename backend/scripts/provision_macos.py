@@ -319,11 +319,16 @@ class MacProvisioner:
 
     def setup(self, *, from_bws: bool = False, from_bws_child: bool = False) -> None:
         self._require_macos(self.platform_name)
+        bws_token = None
+        if from_bws_child:
+            bws_token = self._capture_bws_token()
+            if not bws_token:
+                raise ProvisioningError(
+                    "BWS did not provide HERMES_VOICE_TOKEN to the child process"
+                )
         if from_bws and not from_bws_child:
             self._invoke_bws_child()
             return
-        if from_bws_child and not self.env.get("HERMES_VOICE_TOKEN"):
-            raise ProvisioningError("BWS did not provide HERMES_VOICE_TOKEN to the child process")
 
         layout, tailscale = self._prepare_layout()
         self.layout = layout
@@ -349,7 +354,7 @@ class MacProvisioner:
         self.writer.chmod(layout.support_dir / "server.crt", 0o644)
         self.writer.chmod(layout.support_dir / "server.key", 0o600)
 
-        token = self.env.get("HERMES_VOICE_TOKEN") if from_bws_child else self.token_factory()
+        token = bws_token if from_bws_child else self.token_factory()
         if not token:
             raise ProvisioningError("no server token was provided")
         self.output("Install and start the Harness Voice LaunchAgents.")
@@ -495,6 +500,11 @@ class MacProvisioner:
             raise
         except Exception as exc:
             raise ProvisioningError("HTTPS health check could not reach the backend") from exc
+
+    def _capture_bws_token(self) -> str | None:
+        token = self.env.pop("HERMES_VOICE_TOKEN", None)
+        os.environ.pop("HERMES_VOICE_TOKEN", None)
+        return token
 
     def _invoke_bws_child(self) -> None:
         args = [

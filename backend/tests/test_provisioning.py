@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import plistlib
 import shlex
 import subprocess
@@ -652,6 +653,43 @@ def test_bws_child_reads_token_from_environment_only(tmp_path: Path) -> None:
 
     assert keychain.saved == [("HERMES_VOICE_TOKEN", token)]
     assert all(token not in arg for call, _, _ in runner.calls for arg in call)
+
+
+def test_bws_child_sanitizes_token_from_later_subprocess_environments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    token = "managed-token-only-at-keychain-boundary"
+    monkeypatch.setenv("HERMES_VOICE_TOKEN", token)
+
+    class EnvironmentCapturingRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.subprocess_envs: list[dict[str, str]] = []
+
+        def run(
+            self,
+            args: list[str],
+            *,
+            env: dict[str, str] | None = None,
+            input: str | None = None,
+            capture_output: bool = True,
+        ) -> CommandResult:
+            self.subprocess_envs.append(dict(os.environ if env is None else env))
+            return super().run(
+                args,
+                env=env,
+                input=input,
+                capture_output=capture_output,
+            )
+
+    runner = EnvironmentCapturingRunner()
+    provisioner, keychain, _ = make_provisioner(tmp_path, runner)
+
+    provisioner.setup(from_bws_child=True)
+
+    assert keychain.saved == [("HERMES_VOICE_TOKEN", token)]
+    assert runner.subprocess_envs
+    assert all(env.get("HERMES_VOICE_TOKEN") != token for env in runner.subprocess_envs)
 
 
 def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
