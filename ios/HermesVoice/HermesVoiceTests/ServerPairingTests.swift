@@ -11,6 +11,9 @@ final class ServerPairingTests: XCTestCase {
         let claimResult: Result<String, Error>
         let listResult: Result<[HermesVoiceAPI.HarnessOption], Error>
         private(set) var calls: [Call] = []
+        private(set) var claimedPayload: ServerPairingPayload?
+        private(set) var listBaseURL: String?
+        private(set) var listToken: String?
 
         init(
             claimResult: Result<String, Error> = .success("server-token"),
@@ -22,11 +25,14 @@ final class ServerPairingTests: XCTestCase {
 
         func claim(_ payload: ServerPairingPayload) async throws -> String {
             calls.append(.claim)
+            claimedPayload = payload
             return try claimResult.get()
         }
 
         func listHarnesses(baseURL: String, token: String) async throws -> [HermesVoiceAPI.HarnessOption] {
             calls.append(.listHarnesses)
+            listBaseURL = baseURL
+            listToken = token
             return try listResult.get()
         }
     }
@@ -65,6 +71,7 @@ final class ServerPairingTests: XCTestCase {
         let invalid = [
             validQR.replacingOccurrences(of: "v=1", with: "v=2"),
             "harness-voice://not-pair?v=1&url=https%3A%2F%2Fserver.example&id=abcdefghijklmnop&secret=abcdefghijklmnopqrstuvwxyz123456",
+            "harness-voice://pair:123?v=1&url=https%3A%2F%2Fserver.example&id=abcdefghijklmnop&secret=abcdefghijklmnopqrstuvwxyz123456",
             "not a URL",
             "harness-voice://pair?v=1&url=https%3A%2F%2Fserver.example&id=&secret=abcdefghijklmnopqrstuvwxyz123456",
         ]
@@ -72,6 +79,43 @@ final class ServerPairingTests: XCTestCase {
         for (index, qrString) in invalid.enumerated() {
             XCTAssertThrowsError(try ServerPairingPayload(qrString: qrString), "invalid URI case \(index)")
         }
+    }
+
+    func testRejectsRawAndNonCanonicalURLQueryValues() {
+        let invalid = [
+            validQR.replacingOccurrences(
+                of: "url=https%3A%2F%2Fserver.example%3A8765",
+                with: "url=https://server.example:8765"
+            ),
+            validQR.replacingOccurrences(
+                of: "url=https%3A%2F%2Fserver.example%3A8765",
+                with: "url=https:%2F%2Fserver.example:8765%3Fredirect%3Delsewhere"
+            ),
+        ]
+
+        for (index, qrString) in invalid.enumerated() {
+            XCTAssertThrowsError(try ServerPairingPayload(qrString: qrString), "non-canonical URL case \(index)")
+        }
+    }
+
+    func testAcceptsProvisionerEncodedURLQueryValue() throws {
+        let qrString = validQR.replacingOccurrences(
+            of: "url=https%3A%2F%2Fserver.example%3A8765",
+            with: "url=https:%2F%2Fserver.example:8765"
+        )
+
+        let payload = try ServerPairingPayload(qrString: qrString)
+
+        XCTAssertEqual(payload.baseURL, "https://server.example:8765")
+    }
+
+    func testRejectsQueryBearingBaseURL() {
+        let qrString = validQR.replacingOccurrences(
+            of: "https%3A%2F%2Fserver.example%3A8765",
+            with: "https%3A%2F%2Fserver.example%3A8765%3Fredirect%3Delsewhere"
+        )
+
+        XCTAssertThrowsError(try ServerPairingPayload(qrString: qrString))
     }
 
     func testRejectsInsecureOrMalformedBaseURLs() {
@@ -107,6 +151,9 @@ final class ServerPairingTests: XCTestCase {
         XCTAssertEqual(server.token, "server-token")
         XCTAssertEqual(server.url, "https://server.example:8765")
         XCTAssertEqual(server.harnesses, [availableHermes])
+        XCTAssertEqual(fake.claimedPayload, try makeValidPayload())
+        XCTAssertEqual(fake.listBaseURL, "https://server.example:8765")
+        XCTAssertEqual(fake.listToken, "server-token")
         XCTAssertEqual(fake.calls, [.claim, .listHarnesses])
     }
 
@@ -148,12 +195,12 @@ final class ServerPairingTests: XCTestCase {
 
     func testClaimPairingUsesFixedUnauthenticatedRoute() async throws {
         let payload = try makeValidPayload()
-        var capturedRequest: URLRequest?
-        URLProtocolStub.handler = { request in
-            capturedRequest = request
+        let capture = URLProtocolStub.RequestCapture()
+        URLProtocolStub.setHandler { request in
+            capture.record(request)
             return URLProtocolStub.response(json: #"{"token":"server-token"}"#)
         }
-        defer { URLProtocolStub.handler = nil }
+        defer { URLProtocolStub.setHandler(nil) }
 
         let api = HermesVoiceAPI(
             baseURL: payload.baseURL,
@@ -162,22 +209,23 @@ final class ServerPairingTests: XCTestCase {
         )
         let token = try await api.claimPairing(payload: payload)
 
+        let request = try XCTUnwrap(capture.request())
         XCTAssertEqual(token, "server-token")
-        XCTAssertEqual(capturedRequest?.httpMethod, "POST")
-        XCTAssertEqual(capturedRequest?.url?.path, "/api/pairings/claim")
-        XCTAssertNil(capturedRequest?.value(forHTTPHeaderField: "X-Hermes-Voice-Token"))
-        let body = try XCTUnwrap(URLProtocolStub.bodyData(from: capturedRequest!))
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/pairings/claim")
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-Hermes-Voice-Token"))
+        let body = try XCTUnwrap(URLProtocolStub.bodyData(from: request))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
         XCTAssertEqual(json, ["pairing_id": payload.pairingID, "secret": payload.secret])
     }
 
     func testListHarnessesUsesAuthenticatedRequest() async throws {
-        var capturedRequest: URLRequest?
-        URLProtocolStub.handler = { request in
-            capturedRequest = request
+        let capture = URLProtocolStub.RequestCapture()
+        URLProtocolStub.setHandler { request in
+            capture.record(request)
             return URLProtocolStub.response(json: #"[{"id":"hermes","name":"Hermes","available":true}]"#)
         }
-        defer { URLProtocolStub.handler = nil }
+        defer { URLProtocolStub.setHandler(nil) }
 
         let api = HermesVoiceAPI(
             baseURL: "https://server.example:8765",
@@ -186,10 +234,33 @@ final class ServerPairingTests: XCTestCase {
         )
         let harnesses = try await api.listHarnesses()
 
+        let request = try XCTUnwrap(capture.request())
         XCTAssertEqual(harnesses, [availableHermes])
-        XCTAssertEqual(capturedRequest?.httpMethod, "GET")
-        XCTAssertEqual(capturedRequest?.url?.path, "/api/harnesses")
-        XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "X-Hermes-Voice-Token"), "server-token")
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.url?.path, "/api/harnesses")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Hermes-Voice-Token"), "server-token")
+    }
+
+    func testClaimPairingRedactsNonSuccessResponseBody() async throws {
+        let reflectedBody = "reflected-pairing-secret"
+        URLProtocolStub.setHandler { _ in
+            URLProtocolStub.response(statusCode: 401, body: reflectedBody)
+        }
+        defer { URLProtocolStub.setHandler(nil) }
+
+        let api = HermesVoiceAPI(
+            baseURL: "https://server.example:8765",
+            authToken: "must-not-be-sent",
+            session: URLProtocolStub.session()
+        )
+
+        do {
+            _ = try await api.claimPairing(payload: makeValidPayload())
+            XCTFail("claim failure should throw")
+        } catch {
+            XCTAssertFalse(String(describing: error).contains(reflectedBody))
+            XCTAssertTrue(error.localizedDescription.contains("Pairing claim failed"))
+        }
     }
 
     private enum TestError: Error {
@@ -198,7 +269,28 @@ final class ServerPairingTests: XCTestCase {
 }
 
 private final class URLProtocolStub: URLProtocol {
-    static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
+    final class RequestCapture {
+        private let lock = NSLock()
+        private var storedRequest: URLRequest?
+
+        func record(_ request: URLRequest) {
+            lock.lock()
+            storedRequest = request
+            lock.unlock()
+        }
+
+        func request() -> URLRequest? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedRequest
+        }
+    }
+
+    private static let state = HandlerState()
+
+    static func setHandler(_ handler: ((URLRequest) -> (HTTPURLResponse, Data))?) {
+        state.setHandler(handler)
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -225,19 +317,23 @@ private final class URLProtocolStub: URLProtocol {
     }
 
     static func response(json: String) -> (HTTPURLResponse, Data) {
+        response(statusCode: 200, body: json)
+    }
+
+    static func response(statusCode: Int, body: String) -> (HTTPURLResponse, Data) {
         (
             HTTPURLResponse(
                 url: URL(string: "https://server.example:8765")!,
-                statusCode: 200,
+                statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!,
-            Data(json.utf8)
+            Data(body.utf8)
         )
     }
 
     override func startLoading() {
-        guard let handler = Self.handler else {
+        guard let handler = Self.state.handler() else {
             client?.urlProtocol(self, didFailWithError: TestError.missingHandler)
             return
         }
@@ -248,6 +344,23 @@ private final class URLProtocolStub: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private final class HandlerState {
+        private let lock = NSLock()
+        private var storedHandler: ((URLRequest) -> (HTTPURLResponse, Data))?
+
+        func setHandler(_ handler: ((URLRequest) -> (HTTPURLResponse, Data))?) {
+            lock.lock()
+            storedHandler = handler
+            lock.unlock()
+        }
+
+        func handler() -> ((URLRequest) -> (HTTPURLResponse, Data))? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedHandler
+        }
+    }
 
     private enum TestError: Error {
         case missingHandler

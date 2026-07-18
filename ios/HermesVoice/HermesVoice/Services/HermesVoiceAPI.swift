@@ -36,6 +36,7 @@ struct HermesVoiceAPI {
     enum APIError: LocalizedError {
         case badURL
         case httpStatus(Int, String)
+        case pairingClaimFailed
         case decode(Error)
         case transport(Error)
 
@@ -44,6 +45,8 @@ struct HermesVoiceAPI {
             case .badURL: return "Invalid backend URL."
             case .httpStatus(let code, let body):
                 return "Backend returned \(code): \(body)"
+            case .pairingClaimFailed:
+                return "Pairing claim failed."
             case .decode(let e): return "Could not decode backend response: \(e.localizedDescription)"
             case .transport(let e): return "Network error: \(e.localizedDescription)"
             }
@@ -661,7 +664,7 @@ struct HermesVoiceAPI {
             "secret": payload.secret,
         ])
         let (data, response) = try await perform(req, authenticated: false)
-        try Self.ensureOK(response, data: data)
+        try Self.ensureClaimOK(response)
         do {
             let result = try Self.decoder.decode(PairingClaimResponse.self, from: data)
             guard !result.token.isEmpty else {
@@ -822,6 +825,13 @@ struct HermesVoiceAPI {
         if !(200..<300).contains(http.statusCode) {
             let body = String(data: data, encoding: .utf8) ?? "<no body>"
             throw APIError.httpStatus(http.statusCode, body)
+        }
+    }
+
+    private static func ensureClaimOK(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else { return }
+        if !(200..<300).contains(http.statusCode) {
+            throw APIError.pairingClaimFailed
         }
     }
 }

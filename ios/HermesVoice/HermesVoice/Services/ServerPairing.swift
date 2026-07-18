@@ -17,6 +17,7 @@ struct ServerPairingPayload: Equatable, Sendable {
         guard let components = URLComponents(string: qrString),
               components.scheme == "harness-voice",
               components.host == "pair",
+              components.port == nil,
               components.path.isEmpty,
               components.fragment == nil,
               components.user == nil,
@@ -41,6 +42,8 @@ struct ServerPairingPayload: Equatable, Sendable {
               let baseURL = values["url"],
               let pairingID = values["id"],
               let secret = values["secret"],
+              let rawURLValue = Self.rawQueryValue(named: "url", in: rawQuery),
+              Self.validEncodedURLQueryValue(rawURLValue, decoded: baseURL),
               Self.validBackendToken(pairingID, minLength: 16, maxLength: 128),
               Self.validBackendToken(secret, minLength: 32, maxLength: 256),
               Self.validBaseURL(baseURL)
@@ -66,14 +69,36 @@ struct ServerPairingPayload: Equatable, Sendable {
         }
     }
 
+    private static func rawQueryValue(named name: String, in rawQuery: Substring) -> String? {
+        var matches: [String] = []
+        for item in rawQuery.split(separator: "&", omittingEmptySubsequences: false) {
+            guard let separator = item.firstIndex(of: "=") else { continue }
+            guard String(item[..<separator]) == name else { continue }
+            matches.append(String(item[item.index(after: separator)...]))
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    private static func validEncodedURLQueryValue(_ rawValue: String, decoded value: String) -> Bool {
+        let provisionerAllowed = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:"
+        )
+        let fullyEncodedAllowed = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        )
+        return rawValue == value.addingPercentEncoding(withAllowedCharacters: provisionerAllowed)
+            || rawValue == value.addingPercentEncoding(withAllowedCharacters: fullyEncodedAllowed)
+    }
+
     private static func validBaseURL(_ value: String) -> Bool {
-        guard let url = URL(string: value),
-              url.scheme == "https",
-              let host = url.host,
+        guard let components = URLComponents(string: value),
+              components.scheme == "https",
+              let host = components.host,
               !host.isEmpty,
-              url.fragment == nil,
-              url.user == nil,
-              url.password == nil
+              components.query == nil,
+              components.fragment == nil,
+              components.user == nil,
+              components.password == nil
         else {
             return false
         }
