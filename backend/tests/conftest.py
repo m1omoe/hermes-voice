@@ -89,14 +89,16 @@ def _clean_env(monkeypatch, tmp_path: Path):
     reset_settings_cache()
 
 
-def build_client(*, hermes=None, stt=None, tts=None) -> TestClient:
+def build_client(
+    *, hermes=None, stt=None, tts=None, base_url: str = "http://testserver"
+) -> TestClient:
     app = create_app(
         hermes=hermes if hermes is not None else FakeHermes(),
         stt=stt,
         tts=tts,
         store=AudioStore(max_items=4),
     )
-    return TestClient(app)
+    return TestClient(app, base_url=base_url)
 
 
 __all__ = ["FakeHermes", "FakeTTS", "build_client"]

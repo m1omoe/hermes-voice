@@ -158,13 +158,18 @@ def configured_pairing_client(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HERMES_VOICE_KEY", "/tmp/fake-key.pem")
     reset_settings_cache()
     try:
-        client = build_client(hermes=FakeHermes(), tts=None, stt=None)
+        client = build_client(
+            hermes=FakeHermes(),
+            tts=None,
+            stt=None,
+            base_url="https://testserver",
+        )
         yield client
     finally:
         reset_settings_cache()
 
 
-def test_claim_endpoint_returns_token_once_over_tls_config(
+def test_claim_endpoint_returns_token_once_over_https_transport(
     configured_pairing_client,
 ) -> None:
     client = configured_pairing_client
@@ -183,6 +188,23 @@ def test_claim_endpoint_returns_token_once_over_tls_config(
     )
     assert replay.status_code == 404
     assert replay.json() == {"detail": "pairing code unavailable"}
+
+
+def test_claim_endpoint_rejects_http_transport_even_when_tls_is_configured(
+    configured_pairing_client,
+) -> None:
+    client = configured_pairing_client
+    client.base_url = client.base_url.copy_with(scheme="http")
+    ticket = client.app.state.pairings.create()
+
+    response = client.post(
+        "/api/pairings/claim",
+        json={"pairing_id": ticket.pairing_id, "secret": ticket.secret},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "pairing code unavailable"}
+    assert "test-token" not in response.text
 
 
 def test_claim_endpoint_returns_404_when_tls_unconfigured(monkeypatch) -> None:

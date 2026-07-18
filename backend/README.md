@@ -7,7 +7,8 @@ See the [top-level README](../README.md) for full setup.
 ## Guided macOS setup
 
 Use the app's **Set up a Mac server** prompt in a local coding harness, or run
-the first-party provisioner directly:
+the first-party provisioner directly. Run these commands from the repository
+root (`hermes-voice/`), because the command uses the `backend/scripts/...` path:
 
 ```bash
 uv run --project backend --extra provision python backend/scripts/provision_macos.py setup

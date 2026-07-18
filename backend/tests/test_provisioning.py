@@ -261,11 +261,16 @@ class FakeClock:
 
 
 class FakeKeychain:
-    def __init__(self) -> None:
+    def __init__(self, existing_token: str | None = None) -> None:
+        self.existing_token = existing_token
         self.saved: list[tuple[str, str]] = []
+
+    def get(self, service: str) -> str | None:
+        return self.existing_token
 
     def set(self, service: str, token: str) -> None:
         self.saved.append((service, token))
+        self.existing_token = token
 
 
 class FakeWriter:
@@ -298,8 +303,9 @@ def make_provisioner(
     platform_name: str = "Darwin",
     clock=None,
     sleeper=None,
+    existing_token: str | None = None,
 ) -> tuple[MacProvisioner, FakeKeychain, FakeWriter]:
-    keychain = FakeKeychain()
+    keychain = FakeKeychain(existing_token)
     writer = FakeWriter()
     provisioner_args = {
         "layout": make_layout(tmp_path),
@@ -549,6 +555,20 @@ def test_public_token_only_reaches_keychain_not_assets_output_or_argv(
     assert all(token not in arg for call, _, _ in runner.calls for arg in call)
 
 
+def test_setup_preserves_existing_public_keychain_token(tmp_path: Path) -> None:
+    provisioner, keychain, _ = make_provisioner(
+        tmp_path,
+        FakeRunner(),
+        existing_token="existing-public-token",
+        token_factory=lambda: pytest.fail("existing token must not be regenerated"),
+    )
+
+    provisioner.setup()
+
+    assert keychain.saved == []
+    assert keychain.existing_token == "existing-public-token"
+
+
 def test_setup_from_bws_delegates_without_secret_in_command_or_environment(
     tmp_path: Path,
 ) -> None:
@@ -638,6 +658,21 @@ def test_setup_from_bws_reports_unavailable_registration_without_secret(
         provisioner.setup(from_bws=True)
 
     assert "bws unavailable" not in str(error.value)
+
+
+def test_bws_child_explicitly_replaces_existing_keychain_token(tmp_path: Path) -> None:
+    token = "managed-token-replacement"
+    provisioner, keychain, _ = make_provisioner(
+        tmp_path,
+        FakeRunner(),
+        env={"HERMES_VOICE_TOKEN": token},
+        existing_token="old-public-token",
+    )
+
+    provisioner.setup(from_bws_child=True)
+
+    assert keychain.saved == [("HERMES_VOICE_TOKEN", token)]
+    assert keychain.existing_token == token
 
 
 def test_bws_child_reads_token_from_environment_only(tmp_path: Path) -> None:

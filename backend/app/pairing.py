@@ -11,8 +11,8 @@ from the schedules store (~/.hermes-voice/schedules.db). We use the same
 sync-sqlite3 + asyncio.to_thread pattern as `schedules.py`.
 
 **Threat model.** The HTTP route is the only thing that can surrender the
-token, and it only does so when (a) TLS is configured and (b) the
-ticket is in the store, unclaimed, and not expired. To keep a stolen
+token, and it only does so when (a) the request transport is HTTPS, (b) TLS
+is configured, and (c) the ticket is in the store, unclaimed, and not expired. To keep a stolen
 DB file from being useful, we never persist the raw secret — only a
 SHA-256 verifier. The route compares with `secrets.compare_digest` to
 avoid leaking the secret via timing.

@@ -65,6 +65,8 @@ class FileWriter(Protocol):
 
 
 class Keychain(Protocol):
+    def get(self, service: str) -> str | None: ...
+
     def set(self, service: str, token: str) -> None: ...
 
 
@@ -123,10 +125,13 @@ class LocalFileWriter:
 
 
 class NativeKeychainAPI(Protocol):
+    def get_generic_password(self, service: bytes, account: bytes) -> bytes | None: ...
+
     def set_generic_password(self, service: bytes, account: bytes, password: bytes) -> None: ...
 
 
 class _SecurityFrameworkKeychain:
+    _ITEM_NOT_FOUND = -25300
     _DUPLICATE_ITEM = -25299
 
     def __init__(self) -> None:
@@ -178,6 +183,33 @@ class _SecurityFrameworkKeychain:
         self._release = core_foundation.CFRelease
         self._release.argtypes = [pointer]
         self._release.restype = None
+
+    def get_generic_password(self, service: bytes, account: bytes) -> bytes | None:
+        pointer = ctypes.c_void_p
+        service_buffer = ctypes.create_string_buffer(service)
+        account_buffer = ctypes.create_string_buffer(account)
+        password_length = ctypes.c_uint32()
+        password_data = pointer()
+        item = pointer()
+        status = self._find(
+            None,
+            len(service),
+            service_buffer,
+            len(account),
+            account_buffer,
+            ctypes.byref(password_length),
+            ctypes.byref(password_data),
+            ctypes.byref(item),
+        )
+        if status == self._ITEM_NOT_FOUND:
+            return None
+        if status:
+            raise OSError(status, "SecKeychainFindGenericPassword failed")
+        try:
+            return ctypes.string_at(password_data, password_length.value)
+        finally:
+            self._free_content(None, password_data)
+            self._release(item)
 
     def set_generic_password(self, service: bytes, account: bytes, password: bytes) -> None:
         service_buffer = ctypes.create_string_buffer(service)
@@ -239,6 +271,14 @@ class SecurityKeychain:
         self._account = (
             account if account is not None else user if user is not None else str(os.getuid())
         ).encode()
+
+    def get(self, service: str) -> str | None:
+        try:
+            api = self._api or _SecurityFrameworkKeychain()
+            token = api.get_generic_password(service.encode(), self._account)
+        except OSError as exc:
+            raise ProvisioningError("macOS Keychain could not read the server token") from exc
+        return token.decode() if token is not None else None
 
     def set(self, service: str, token: str) -> None:
         try:
@@ -354,14 +394,23 @@ class MacProvisioner:
         self.writer.chmod(layout.support_dir / "server.crt", 0o644)
         self.writer.chmod(layout.support_dir / "server.key", 0o600)
 
-        token = bws_token if from_bws_child else self.token_factory()
+        existing_token = None if from_bws_child else self.keychain.get(KEYCHAIN_SERVICE)
+        token = (
+            bws_token
+            if from_bws_child
+            else self.token_factory()
+            if existing_token is None
+            else existing_token
+        )
         if not token:
             raise ProvisioningError("no server token was provided")
+        replace_token = from_bws_child or existing_token is None
         self.output("Install and start the Harness Voice LaunchAgents.")
         if not self.confirm("install and start the LaunchAgents"):
             raise ProvisioningError("LaunchAgent installation cancelled")
         self._unload_existing_agents(layout)
-        self.keychain.set(KEYCHAIN_SERVICE, token)
+        if replace_token:
+            self.keychain.set(KEYCHAIN_SERVICE, token)
         self._write_assets(layout, tailscale)
         self._start_agents(layout)
         self._require_https_health(layout)

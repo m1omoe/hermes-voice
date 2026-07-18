@@ -610,7 +610,9 @@ def _register_routes(app: FastAPI) -> None:
         )
 
     @app.post("/api/pairings/claim", response_model=PairingClaimResponse)
-    async def claim_pairing(body: PairingClaimRequest) -> PairingClaimResponse:
+    async def claim_pairing(
+        request: Request, body: PairingClaimRequest
+    ) -> PairingClaimResponse:
         """One-time pairing ticket claim (unauthenticated by design).
 
         The iOS app posts the QR-encoded pairing_id + secret and gets
@@ -619,13 +621,14 @@ def _register_routes(app: FastAPI) -> None:
         `_require_token` — the whole point of pairing is to deliver the
         token to a device that doesn't have it yet.
 
-        The route is gated by `settings.pairing_enabled` (auth_token +
-        cert + key all present) so a plain-HTTP deployment can never
-        surrender the token. Every unknown/expired/replayed/wrong-secret
+        The route requires an actual HTTPS request plus
+        `settings.pairing_enabled` (auth_token + cert + key all present), so a
+        plain-HTTP deployment can never surrender the token. Every
+        unknown/expired/replayed/wrong-secret
         claim returns the SAME 404 body — leaking which case it is
         would help an attacker iterate."""
         settings: Settings = app.state.settings
-        if not settings.pairing_enabled:
+        if request.url.scheme != "https" or not settings.pairing_enabled:
             raise HTTPException(
                 status_code=404, detail="pairing code unavailable",
             )
