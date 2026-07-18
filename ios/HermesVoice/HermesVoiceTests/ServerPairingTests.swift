@@ -246,23 +246,34 @@ final class ServerPairingTests: XCTestCase {
 
     @MainActor
     func testCaptureLifecycleCancelsQueuedActivationAndStopsUnconditionally() async {
-        let configured = expectation(description: "configuration must be cancelled")
-        configured.isInverted = true
-        let started = expectation(description: "start must be cancelled")
-        started.isInverted = true
+        let queue = DispatchQueue(label: "capture-test")
+        let barrierEntered = expectation(description: "capture queue barrier entered")
+        let barrierRelease = DispatchSemaphore(value: 0)
+        queue.async {
+            barrierEntered.fulfill()
+            barrierRelease.wait()
+        }
+        await fulfillment(of: [barrierEntered], timeout: 1)
+
+        let configured = DispatchSemaphore(value: 0)
+        let started = DispatchSemaphore(value: 0)
         let stopped = expectation(description: "stop must always run")
         let lifecycle = CaptureSessionLifecycle(
-            queue: DispatchQueue(label: "capture-test"),
-            startOnQueue: { started.fulfill() },
+            queue: queue,
+            startOnQueue: { started.signal() },
             stopOnQueue: { stopped.fulfill() }
         )
 
         lifecycle.activate(configuration: {
-            configured.fulfill()
+            configured.signal()
             return false
         })
         lifecycle.deactivate()
-        await fulfillment(of: [configured, started, stopped], timeout: 1)
+        barrierRelease.signal()
+        await fulfillment(of: [stopped], timeout: 1)
+
+        XCTAssertEqual(configured.wait(timeout: .now()), .timedOut)
+        XCTAssertEqual(started.wait(timeout: .now()), .timedOut)
     }
 
     func testCoordinatorClaimsThenAuthenticates() async throws {
