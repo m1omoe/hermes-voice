@@ -627,7 +627,7 @@ struct HermesVoiceAPI {
 
     // MARK: - Harnesses
 
-    struct HarnessOption: Decodable, Identifiable, Equatable {
+    struct HarnessOption: Decodable, Identifiable, Equatable, Sendable {
         var id: String { harnessId }
         let harnessId: String
         let name: String
@@ -646,6 +646,30 @@ struct HermesVoiceAPI {
         try Self.ensureOK(response, data: data)
         do {
             return try Self.decoder.decode([HarnessOption].self, from: data)
+        } catch {
+            throw APIError.decode(error)
+        }
+    }
+
+    func claimPairing(payload: ServerPairingPayload) async throws -> String {
+        let url = try buildURL("/api/pairings/claim")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "pairing_id": payload.pairingID,
+            "secret": payload.secret,
+        ])
+        let (data, response) = try await perform(req, authenticated: false)
+        try Self.ensureOK(response, data: data)
+        do {
+            let result = try Self.decoder.decode(PairingClaimResponse.self, from: data)
+            guard !result.token.isEmpty else {
+                throw APIError.decode(NSError(domain: "HermesVoiceAPI", code: -2))
+            }
+            return result.token
+        } catch let error as APIError {
+            throw error
         } catch {
             throw APIError.decode(error)
         }
@@ -761,6 +785,10 @@ struct HermesVoiceAPI {
 
     // MARK: - Internals
 
+    private struct PairingClaimResponse: Decodable {
+        let token: String
+    }
+
     private static let decoder: JSONDecoder = JSONDecoder()
 
     private func buildURL(_ path: String) throws -> URL {
@@ -770,9 +798,13 @@ struct HermesVoiceAPI {
         return url
     }
 
-    private func perform(_ request: URLRequest, body: Data? = nil) async throws -> (Data, URLResponse) {
+    private func perform(
+        _ request: URLRequest,
+        body: Data? = nil,
+        authenticated: Bool = true
+    ) async throws -> (Data, URLResponse) {
         var req = request
-        if !authToken.isEmpty {
+        if authenticated && !authToken.isEmpty {
             req.setValue(authToken, forHTTPHeaderField: "X-Hermes-Voice-Token")
         }
         do {
