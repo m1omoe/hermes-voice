@@ -2,16 +2,35 @@
 
 FastAPI service mediating between the iOS app and the local Hermes CLI.
 
-See the [top-level README](../README.md) for full setup. Quick reference:
+See the [top-level README](../README.md) for full setup.
+
+## Guided macOS setup
+
+Use the app's **Set up a Mac server** prompt in a local coding harness, or run
+the first-party provisioner directly:
+
+```bash
+uv run --project backend --extra provision python backend/scripts/provision_macos.py setup
+uv run --project backend --extra provision python backend/scripts/provision_macos.py setup --from-bws
+uv run --project backend --extra provision python backend/scripts/provision_macos.py pair
+```
+
+The provisioner discovers the current checkout and Tailscale MagicDNS name,
+stores the token in Keychain, creates HTTPS LaunchAgents after confirmation, and
+renders a short-lived pairing QR only after `/health` reports HTTPS readiness.
+The checked-in `launchd/` files are non-operational deprecation stubs.
+
+## Advanced local development
 
 ```bash
 uv sync --extra dev               # base + test deps
 uv sync --extra dev --extra local # add faster-whisper + piper
-uv run python -m app              # start server (auto-loads backend/.env)
+uv run python -m app              # start loopback server (auto-loads backend/.env)
 uv run pytest -q                  # run tests (env-isolated per test)
 ```
 
-`backend/.env` is loaded automatically on startup via `python-dotenv`. Shell env vars still win over .env when both are set — useful for one-off overrides like `STT_PROVIDER=elevenlabs uv run python -m app`.
+`backend/.env` is for advanced local development only; the guided provisioner
+never reads or writes it. Shell env vars still win over `.env` when both are set.
 
 ## Endpoints
 

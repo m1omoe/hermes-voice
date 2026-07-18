@@ -4,7 +4,15 @@ import plistlib
 import shlex
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from scripts.provision_macos import (
+    CommandResult,
+    MacProvisioner,
+    ProvisioningError,
+)
 from scripts.provisioning import (
     MacServerLayout,
     render_backend_plist,
@@ -158,3 +166,269 @@ def test_renew_plist_points_at_script_and_uses_renew_label(tmp_path: Path) -> No
     assert values["ProgramArguments"] == ["/bin/bash", str(script_path)]
     assert values["StartInterval"] == 2_592_000
     assert values["RunAtLoad"] is False
+
+
+class FakeRunner:
+    def __init__(
+        self,
+        *,
+        uv: bool = True,
+        tailscale: bool = True,
+        dns_name: str = "mandalore.tailnet.ts.net.",
+        cert_ok: bool = True,
+        bws_ok: bool = True,
+        health_body: dict | None = None,
+    ) -> None:
+        self.uv = uv
+        self.tailscale = tailscale
+        self.dns_name = dns_name
+        self.cert_ok = cert_ok
+        self.bws_ok = bws_ok
+        self.health_body = health_body or {"status": "ok", "scheme": "https"}
+        self.calls: list[tuple[list[str], dict[str, str] | None, str | None]] = []
+
+    def which(self, name: str) -> str | None:
+        if name == "uv" and self.uv:
+            return "/opt/custom/bin/uv"
+        if name == "tailscale" and self.tailscale:
+            return "/opt/custom/bin/tailscale"
+        return None
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        input: str | None = None,
+    ) -> CommandResult:
+        self.calls.append((args, env, input))
+        if "cert" in args:
+            return CommandResult(0 if self.cert_ok else 1, "", "certificate failed")
+        if args[:2] == ["bws-project", "run"]:
+            return CommandResult(0 if self.bws_ok else 1, "", "bws unavailable")
+        if "status" in args and "--json" in args:
+            return CommandResult(
+                0,
+                f'{{"Self": {{"DNSName": "{self.dns_name}"}}}}',
+                "",
+            )
+        return CommandResult(0, "", "")
+
+    def health(self, url: str) -> dict:
+        return self.health_body
+
+
+class FakeKeychain:
+    def __init__(self) -> None:
+        self.saved: list[tuple[str, str]] = []
+
+    def set(self, service: str, token: str) -> None:
+        self.saved.append((service, token))
+
+
+class FakeWriter:
+    def __init__(self) -> None:
+        self.text: dict[Path, str] = {}
+        self.copies: list[tuple[Path, Path]] = []
+        self.modes: list[tuple[Path, int]] = []
+
+    def write_text(self, path: Path, content: str, *, mode: int | None = None) -> None:
+        self.text[path] = content
+        if mode is not None:
+            self.modes.append((path, mode))
+
+    def copy(self, source: Path, destination: Path) -> None:
+        self.copies.append((source, destination))
+
+    def chmod(self, path: Path, mode: int) -> None:
+        self.modes.append((path, mode))
+
+
+def make_provisioner(
+    tmp_path: Path,
+    runner: FakeRunner,
+    *,
+    token_factory=lambda: "public-token",
+    env: dict[str, str] | None = None,
+    platform_name: str = "Darwin",
+) -> tuple[MacProvisioner, FakeKeychain, FakeWriter]:
+    keychain = FakeKeychain()
+    writer = FakeWriter()
+    provisioner = MacProvisioner(
+        layout=make_layout(tmp_path),
+        runner=runner,
+        keychain=keychain,
+        writer=writer,
+        confirm=lambda _: True,
+        token_factory=token_factory,
+        platform_name=platform_name,
+        env=env,
+    )
+    return provisioner, keychain, writer
+
+
+def test_setup_rejects_non_macos(tmp_path: Path) -> None:
+    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner(), platform_name="Linux")
+
+    with pytest.raises(ProvisioningError, match="macOS"):
+        provisioner.setup()
+
+
+def test_setup_stops_when_tailscale_is_missing(tmp_path: Path) -> None:
+    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner(tailscale=False))
+
+    with pytest.raises(ProvisioningError, match="Tailscale"):
+        provisioner.setup()
+
+
+def test_setup_stops_when_uv_is_missing(tmp_path: Path) -> None:
+    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner(uv=False))
+
+    with pytest.raises(ProvisioningError, match="uv"):
+        provisioner.setup()
+
+
+def test_discovery_normalizes_magic_dns_trailing_dot(tmp_path: Path) -> None:
+    runner = FakeRunner(dns_name="mandalore.tailnet.ts.net.")
+
+    layout = MacProvisioner.discover(
+        runner=runner,
+        home=tmp_path / "home",
+        repo_root=tmp_path / "checkout",
+        platform_name="Darwin",
+    )
+
+    assert layout.dns_name == "mandalore.tailnet.ts.net"
+
+
+def test_setup_stops_when_magic_dns_is_missing(tmp_path: Path) -> None:
+    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner(dns_name=""))
+    provisioner.layout = make_layout(tmp_path).__class__(
+        repo_root=make_layout(tmp_path).repo_root,
+        home=make_layout(tmp_path).home,
+        uv=make_layout(tmp_path).uv,
+        dns_name="",
+        support_dir=make_layout(tmp_path).support_dir,
+    )
+
+    with pytest.raises(ProvisioningError, match="MagicDNS"):
+        provisioner.setup()
+
+
+def test_setup_requires_confirmation_before_certificate_request(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+    provisioner.confirm = lambda _: False
+
+    with pytest.raises(ProvisioningError, match="cancelled"):
+        provisioner.setup()
+
+    assert not any("cert" in call[0] for call in runner.calls)
+
+
+def test_setup_refuses_to_continue_after_certificate_failure(tmp_path: Path) -> None:
+    runner = FakeRunner(cert_ok=False)
+    provisioner, _, writer = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="certificate"):
+        provisioner.setup()
+
+    assert writer.text == {}
+    assert not any("launchctl" in call[0] for call in runner.calls)
+
+
+def test_public_token_only_reaches_keychain_not_assets_output_or_argv(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    token = "public-token-never-rendered"
+    runner = FakeRunner()
+    provisioner, keychain, writer = make_provisioner(
+        tmp_path, runner, token_factory=lambda: token
+    )
+
+    provisioner.setup()
+
+    assert keychain.saved == [("HERMES_VOICE_TOKEN", token)]
+    assert token not in "".join(writer.text.values())
+    assert token not in capsys.readouterr().out
+    assert all(token not in arg for call, _, _ in runner.calls for arg in call)
+
+
+def test_setup_from_bws_delegates_without_secret_in_command_or_environment(
+    tmp_path: Path,
+) -> None:
+    token = "managed-token-never-in-argv"
+    runner = FakeRunner()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        env={"HERMES_VOICE_TOKEN": token},
+    )
+
+    provisioner.setup(from_bws=True)
+
+    assert runner.calls[0][0][:3] == ["bws-project", "run", "--"]
+    assert token not in runner.calls[0][0]
+    assert token not in (runner.calls[0][1] or {})
+
+
+def test_setup_from_bws_reports_unavailable_registration_without_secret(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(bws_ok=False)
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="project registration") as error:
+        provisioner.setup(from_bws=True)
+
+    assert "bws unavailable" not in str(error.value)
+
+
+def test_bws_child_reads_token_from_environment_only(tmp_path: Path) -> None:
+    token = "managed-token-never-in-argv"
+    runner = FakeRunner()
+    provisioner, keychain, _ = make_provisioner(
+        tmp_path,
+        runner,
+        env={"HERMES_VOICE_TOKEN": token},
+    )
+
+    provisioner.setup(from_bws_child=True)
+
+    assert keychain.saved == [("HERMES_VOICE_TOKEN", token)]
+    assert all(token not in arg for call, _, _ in runner.calls for arg in call)
+
+
+def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
+    runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="HTTPS"):
+        provisioner.create_pairing_qr()
+
+
+def test_pair_prints_only_instruction_expiry_and_qr(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("qrcode")
+    secret = "pairing-secret-never-printed"
+
+    class FakePairingStore:
+        def create(self, *, ttl_seconds: int) -> SimpleNamespace:
+            assert ttl_seconds == 300
+            return SimpleNamespace(
+                pairing_id="pairing-id",
+                secret=secret,
+                expires_at=1_800_000_000.0,
+            )
+
+    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner())
+    provisioner.pairing_store = FakePairingStore()
+
+    payload = provisioner.create_pairing_qr()
+    output = capsys.readouterr().out
+
+    assert payload.startswith("harness-voice://pair?")
+    assert "Scan this QR code" in output
+    assert "Pairing code expires at" in output
+    assert secret not in output
+    assert secret in payload

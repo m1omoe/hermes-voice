@@ -28,18 +28,41 @@ A turn is one round trip: iPhone records → POSTs audio → backend STT → `he
 
 ## Quick start
 
-### 1. Backend
+### 1. Set up a Mac server (recommended)
+
+From the app's **Set up a Mac server** screen, copy the versioned prompt into a
+local coding harness running on the target Mac. The prompt runs the first-party
+provisioner and pauses before Tailscale certificate requests and LaunchAgent
+installation. It never asks you to paste a token into the chat.
+
+The provisioner supports these commands:
+
+```bash
+uv run --project backend --extra provision python backend/scripts/provision_macos.py setup
+uv run --project backend --extra provision python backend/scripts/provision_macos.py setup --from-bws
+uv run --project backend --extra provision python backend/scripts/provision_macos.py pair
+```
+
+`setup` discovers the checkout, `uv`, Tailscale, and MagicDNS name, generates
+user-specific launchd assets, stores the server token in the macOS Keychain, and
+checks the public HTTPS `/health` endpoint. `--from-bws` is an opt-in path for a
+registered Bitwarden Secrets Manager project; the managed token is passed to a
+child process through its environment only. `pair` shows a five-minute,
+one-time QR code after HTTPS is healthy. Scan it from the app; the long-lived
+server token is never encoded in the QR code.
+
+### Advanced local development
+
+For local-only development without a public Tailscale server:
 
 ```bash
 cd backend
 uv sync --extra dev
-cp .env.example .env          # edit if you have keys; otherwise skip
+cp .env.example .env          # optional; do not use this for guided setup
 uv run python -m app          # serves on http://127.0.0.1:8765
 ```
 
-With **no env vars set**, the backend auto-engages mock mode — `/health` reports it, `/api/text` returns canned replies, `/api/audio` is disabled until you wire up an STT provider. This lets you iterate on the iOS app without burning API calls.
-
-Smoke test it:
+With no env vars set, the backend auto-engages mock mode. Smoke-test it with:
 
 ```bash
 curl -s http://127.0.0.1:8765/health | jq
@@ -94,27 +117,20 @@ You have three options, in order of preference:
 | `OPENAI_TTS_VOICE` | `onyx` | Masculine fallback voice. |
 | `PIPER_VOICE_PATH` | unset | Absolute path to a `.onnx` voice (with `.onnx.json` next to it). |
 
-## Auto-starting the backend (launchd)
+## Auto-starting the backend
 
-For "always-up" reliability, install the LaunchAgent so the backend starts at
-login and respawns on crash. A second LaunchAgent handles cert renewal on a
-30-day cadence:
+The guided `setup` command generates portable, user-specific LaunchAgents under
+the current user's Library directories and starts them only after confirmation.
+It also generates a renewal agent for the detected Tailscale certificate:
 
 ```bash
-# Backend service
-cp backend/launchd/dev.finklea.harnessvoice.backend.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) \
-  ~/Library/LaunchAgents/dev.finklea.harnessvoice.backend.plist
-
-# Cert renewal (every 30 days)
-cp backend/launchd/dev.finklea.harnessvoice.cert-renew.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) \
-  ~/Library/LaunchAgents/dev.finklea.harnessvoice.cert-renew.plist
+uv run --project backend --extra provision python backend/scripts/provision_macos.py setup
 ```
 
-Verify it's running: `launchctl print gui/$(id -u)/dev.finklea.harnessvoice.backend`
-Tail logs: `tail -F /tmp/harness-voice.log`
-Force a cert renewal now: `launchctl kickstart -k gui/$(id -u)/dev.finklea.harnessvoice.cert-renew`
+The checked-in files under `backend/launchd/` are deprecation stubs and must not
+be copied into `~/Library/LaunchAgents/`. For advanced manual development,
+continue using the loopback command in the section above; do not adapt the
+checked-in stubs into a public service.
 
 The iOS app's Settings → Diagnostics screen shows "Backend last seen" so you
 can spot the moment it goes unreachable.
