@@ -8,7 +8,7 @@
          uv run --project backend --extra provision python
            backend/scripts/provision_macos.py setup -->
     <key>Label</key>
-    <string>dev.finklea.harnessvoice.cert-renew.deprecated</string>
+    <string>io.harnessvoice.backend.deprecated</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/false</string>

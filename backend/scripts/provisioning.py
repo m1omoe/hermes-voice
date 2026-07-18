@@ -14,8 +14,8 @@ class MacServerLayout:
     uv: Path
     dns_name: str
     support_dir: Path
-    backend_label: str = "dev.finklea.harnessvoice.backend"
-    renew_label: str = "dev.finklea.harnessvoice.cert-renew"
+    backend_label: str = "io.harnessvoice.backend"
+    renew_label: str = "io.harnessvoice.cert-renew"
 
 
 def _certificate_paths(layout: MacServerLayout) -> tuple[Path, Path]:

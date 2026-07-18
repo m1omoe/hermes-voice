@@ -213,8 +213,8 @@ class MacServerLayout:
     uv: Path
     dns_name: str
     support_dir: Path
-    backend_label: str = "dev.finklea.harnessvoice.backend"
-    renew_label: str = "dev.finklea.harnessvoice.cert-renew"
+    backend_label: str = "io.harnessvoice.backend"
+    renew_label: str = "io.harnessvoice.cert-renew"
 
 
 def render_backend_wrapper(layout: MacServerLayout, keychain_service: str) -> str: ...
@@ -282,8 +282,8 @@ git commit -m "feat: render portable macOS backend services"
 - Modify: `backend/pyproject.toml`
 - Modify: `README.md`
 - Modify: `backend/README.md`
-- Modify: `backend/launchd/dev.finklea.harnessvoice.backend.plist`
-- Modify: `backend/launchd/dev.finklea.harnessvoice.cert-renew.plist`
+- Modify: `backend/launchd/io.harnessvoice.backend.plist`
+- Modify: `backend/launchd/io.harnessvoice.cert-renew.plist`
 - Modify: `backend/launchd/renew-cert.sh`
 - Test: `backend/tests/test_provisioning.py`
 
@@ -577,7 +577,7 @@ Expected: `TEST SUCCEEDED`.
 
 - [ ] **Step 3: Perform the fresh-Mac acceptance check**
 
-On Mandalore, use the app-copied prompt in the local harness. Confirm the provisioner stops for Tailscale/Keychain/BWS approval when appropriate, then starts a `dev.finklea.harnessvoice.backend` launch agent listening at the detected HTTPS MagicDNS URL. Scan the terminal QR from the iPhone, validate the saved profile and a real Hermes turn, then verify QR replay and expiry fail. Restart/login Mandalore and confirm the agent restarts. Finally confirm manual URL/token and Bonjour setup still work against an existing server.
+On Mandalore, use the app-copied prompt in the local harness. Confirm the provisioner stops for Tailscale/Keychain/BWS approval when appropriate, then starts an `io.harnessvoice.backend` launch agent listening at the detected HTTPS MagicDNS URL. Scan the terminal QR from the iPhone, validate the saved profile and a real Hermes turn, then verify QR replay and expiry fail. Restart/login Mandalore and confirm the agent restarts. Finally confirm manual URL/token and Bonjour setup still work against an existing server.
 
 - [ ] **Step 4: Record completion and commit**
 

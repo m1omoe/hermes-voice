@@ -20,7 +20,7 @@ Push notifications need an APNs auth key (`.p8`) from Apple Developer.
    APNS_BUNDLE_ID=dev.finklea.harnessvoice
    APNS_USE_SANDBOX=true        # set false after you ship via TestFlight or App Store
    ```
-8. Restart the backend (`launchctl kickstart -k gui/$UID/dev.finklea.harnessvoice.backend` if you're using the LaunchAgent).
+8. Restart the backend (`launchctl kickstart -k gui/$UID/io.harnessvoice.backend` if you're using the LaunchAgent).
 9. On the iPhone: open Hermes Voice → Settings → Notifications → flip **Allow notifications** ON. Accept the OS prompt. The app POSTs your APNs device token to `/api/devices`.
 10. Verify: `sqlite3 ~/.hermes-voice/schedules.db 'select platform, environment, registered_at from devices;'` should show one row.
 

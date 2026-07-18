@@ -38,6 +38,13 @@ def load_plist(rendered: str) -> dict:
     return plistlib.loads(rendered.encode())
 
 
+def test_default_launchagent_identity_is_product_owned(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+
+    assert layout.backend_label == "io.harnessvoice.backend"
+    assert layout.renew_label == "io.harnessvoice.cert-renew"
+
+
 def test_backend_assets_use_detected_paths_only(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
@@ -410,6 +417,19 @@ def test_setup_refuses_to_continue_after_certificate_failure(tmp_path: Path) -> 
 
     assert writer.text == {}
     assert not any("launchctl" in call[0] for call in runner.calls)
+
+
+def test_setup_generates_product_owned_launchagent_filenames(
+    tmp_path: Path,
+) -> None:
+    provisioner, _, writer = make_provisioner(tmp_path, FakeRunner())
+
+    provisioner.setup()
+
+    launch_agents = make_layout(tmp_path).home / "Library/LaunchAgents"
+    assert launch_agents / "io.harnessvoice.backend.plist" in writer.text
+    assert launch_agents / "io.harnessvoice.cert-renew.plist" in writer.text
+    assert all("dev.finklea" not in str(path) for path in writer.text)
 
 
 def test_setup_passes_discovered_tailscale_to_renewal_asset(tmp_path: Path) -> None:
