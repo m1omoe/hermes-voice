@@ -5,7 +5,7 @@
 ## Plan
 
 - [x] Pairing ticket store + claim API. Verify: `uv run --directory backend pytest tests/test_pairing.py -v` (19 pairing tests; full backend 237 passed; Fable re-review SHIP)
-- [ ] Portable launchd renderer. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v`
+- [x] Portable launchd renderer — committed `8a920ad` + hardening `b8de192`, `398c603`; task review clean after two security fixes. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (8 passed; ruff clean; no maintainer-path matches).
 - [ ] Guided provisioner + terminal QR. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v`
 - [ ] iOS pairing payload + claim client. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:HermesVoiceTests/ServerPairingTests test`
 - [ ] iOS QR scanner/setup sheet. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:HermesVoiceTests/ServerPairingTests test`
