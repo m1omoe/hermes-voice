@@ -208,3 +208,13 @@
 
 **Rationale**: A local harness already has the user's terminal context and can request macOS/Tailscale approvals naturally; the app needs no remote-control trust channel. The provisioner removes machine-specific deployment drift, while a one-time TLS claim delivers the QR UX without treating the barcode as a permanent password. Keychain storage avoids introducing a tracked or plaintext dotenv flow; BWS remains an optional shortcut, not a public-user prerequisite. Full design: `docs/superpowers/specs/2026-07-16-self-serve-server-setup-design.md`.
 
+## [2026-07-17] Use neutral `io.harnessvoice` launchd identities for public provisioning
+
+**Context**: The old checked-in templates and initial renderer defaults used `dev.finklea.harnessvoice.*`. Although not a filesystem path, the namespace identifies the maintainer and would become every public user's generated LaunchAgent filename and label.
+
+**Decision**: New provisioned services use `io.harnessvoice.backend` and `io.harnessvoice.cert-renew`; deprecated templates and public instructions use the same neutral names.
+
+**Alternatives considered**: Retain the historical labels for continuity; derive a per-user label; use a neutral product-owned namespace.
+
+**Rationale**: The provisioner is a public setup path and must not bake the maintainer identity into operational assets. A stable product namespace is portable, predictable for diagnostics, and does not need per-user label migration. Existing installed legacy agents are outside this feature and remain a manual migration concern.
+
