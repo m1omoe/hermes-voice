@@ -178,6 +178,93 @@ final class ServerPairingTests: XCTestCase {
         XCTAssertEqual(fake.calls, [.claim, .listHarnesses])
     }
 
+    @MainActor
+    func testPairingModelRetriesNoHarnessWithClaimedCredentialWithoutReclaiming() async {
+        let fake = SequencedPairingClient(listResults: [[], [availableHermes]])
+        var pairedCount = 0
+        let model = PairServerSheetModel(client: fake) { _ in pairedCount += 1 }
+
+        await model.handleCode(validQR)
+        let initialClaimCount = await fake.claimCount()
+        let initialListCount = await fake.listCount()
+        XCTAssertEqual(initialClaimCount, 1)
+        XCTAssertEqual(initialListCount, 1)
+        XCTAssertEqual(model.failure, .noHarness)
+
+        await model.retryClaimedHarnesses()
+
+        let finalClaimCount = await fake.claimCount()
+        let finalListCount = await fake.listCount()
+        let finalListTokens = await fake.listTokens()
+        XCTAssertEqual(finalClaimCount, 1)
+        XCTAssertEqual(finalListCount, 2)
+        XCTAssertEqual(finalListTokens, ["server-token", "server-token"])
+        XCTAssertEqual(pairedCount, 1)
+        XCTAssertTrue(model.didPair)
+        XCTAssertFalse(model.failure?.message.contains("server-token") ?? false)
+    }
+
+    @MainActor
+    func testPairingTaskCancellationIgnoresLateClaimCompletion() async {
+        let fake = SuspendedPairingClient(listResult: [availableHermes])
+        var pairedCount = 0
+        let model = PairServerSheetModel(client: fake) { _ in pairedCount += 1 }
+        let task = model.startPairing(validQR)
+
+        await fake.gate.waitUntilClaimStarted()
+        model.deactivate()
+        await fake.gate.releaseClaim()
+        if let task {
+            await task.value
+        }
+
+        XCTAssertEqual(pairedCount, 0)
+        XCTAssertFalse(model.didPair)
+        XCTAssertFalse(model.isPairing)
+        XCTAssertNil(model.failure)
+    }
+
+    @MainActor
+    func testConcurrentDuplicateScansDuringSuspendedClaimOnlyPairOnce() async {
+        let fake = SuspendedPairingClient(listResult: [availableHermes])
+        var pairedCount = 0
+        let model = PairServerSheetModel(client: fake) { _ in pairedCount += 1 }
+        let first = Task { await model.handleCode(validQR) }
+
+        await fake.gate.waitUntilClaimStarted()
+        let second = Task { await model.handleCode(validQR) }
+        await second.value
+        await fake.gate.releaseClaim()
+        await first.value
+
+        let claimCount = await fake.claimCount()
+        let listCount = await fake.listCount()
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(listCount, 1)
+        XCTAssertEqual(pairedCount, 1)
+    }
+
+    @MainActor
+    func testCaptureLifecycleCancelsQueuedActivationAndStopsUnconditionally() async {
+        let configured = expectation(description: "configuration must be cancelled")
+        configured.isInverted = true
+        let started = expectation(description: "start must be cancelled")
+        started.isInverted = true
+        let stopped = expectation(description: "stop must always run")
+        let lifecycle = CaptureSessionLifecycle(
+            queue: DispatchQueue(label: "capture-test"),
+            startOnQueue: { started.fulfill() },
+            stopOnQueue: { stopped.fulfill() }
+        )
+
+        lifecycle.activate(configuration: {
+            configured.fulfill()
+            return false
+        })
+        lifecycle.deactivate()
+        await fulfillment(of: [configured, started, stopped], timeout: 1)
+    }
+
     func testCoordinatorClaimsThenAuthenticates() async throws {
         let fake = FakePairingClient(
             listResult: .success([availableHermes])
@@ -302,6 +389,93 @@ final class ServerPairingTests: XCTestCase {
     private enum TestError: Error {
         case failed
     }
+}
+
+private actor SequencedPairingClient: ServerPairingClient {
+    private var results: [[HermesVoiceAPI.HarnessOption]]
+    private var claims = 0
+    private var lists = 0
+    private var tokens: [String] = []
+
+    init(listResults: [[HermesVoiceAPI.HarnessOption]]) {
+        self.results = listResults
+    }
+
+    func claim(_ payload: ServerPairingPayload) async throws -> String {
+        claims += 1
+        return "server-token"
+    }
+
+    func listHarnesses(baseURL: String, token: String) async throws -> [HermesVoiceAPI.HarnessOption] {
+        lists += 1
+        tokens.append(token)
+        return results.isEmpty ? [] : results.removeFirst()
+    }
+
+    func claimCount() -> Int { claims }
+    func listCount() -> Int { lists }
+    func listTokens() -> [String] { tokens }
+}
+
+private actor ClaimGate {
+    private var claimStarted = false
+    private var claimReleased = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markClaimStarted() {
+        claimStarted = true
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func waitUntilClaimStarted() async {
+        if claimStarted { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func releaseClaim() {
+        claimReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func waitForClaimRelease() async {
+        if claimReleased { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+}
+
+private actor SuspendedPairingClient: ServerPairingClient {
+    let gate = ClaimGate()
+    private let listResult: [HermesVoiceAPI.HarnessOption]
+    private var claims = 0
+    private var lists = 0
+
+    init(listResult: [HermesVoiceAPI.HarnessOption]) {
+        self.listResult = listResult
+    }
+
+    func claim(_ payload: ServerPairingPayload) async throws -> String {
+        claims += 1
+        await gate.markClaimStarted()
+        await gate.waitForClaimRelease()
+        return "server-token"
+    }
+
+    func listHarnesses(baseURL: String, token: String) async throws -> [HermesVoiceAPI.HarnessOption] {
+        lists += 1
+        return listResult
+    }
+
+    func claimCount() -> Int { claims }
+    func listCount() -> Int { lists }
 }
 
 private final class URLProtocolStub: URLProtocol {

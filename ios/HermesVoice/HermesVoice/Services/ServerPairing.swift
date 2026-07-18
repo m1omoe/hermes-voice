@@ -141,6 +141,16 @@ struct LiveServerPairingClient: ServerPairingClient {
     }
 }
 
+struct ClaimedServerCredential: Equatable, Sendable {
+    let baseURL: String
+    let token: String
+}
+
+enum ServerPairingAttempt: Sendable {
+    case paired(PairedServer)
+    case noAvailableHarness(ClaimedServerCredential)
+}
+
 struct ServerPairingCoordinator {
     let client: any ServerPairingClient
 
@@ -148,15 +158,30 @@ struct ServerPairingCoordinator {
         self.client = client
     }
 
-    func pair(_ payload: ServerPairingPayload) async throws -> PairedServer {
+    func claim(_ payload: ServerPairingPayload) async throws -> ClaimedServerCredential {
         let token = try await client.claim(payload)
         guard !token.isEmpty else { throw ServerPairingError.emptyToken }
+        return ClaimedServerCredential(baseURL: payload.baseURL, token: token)
+    }
 
-        let harnesses = try await client.listHarnesses(baseURL: payload.baseURL, token: token)
+    func authenticate(_ credential: ClaimedServerCredential) async throws -> ServerPairingAttempt {
+        let harnesses = try await client.listHarnesses(baseURL: credential.baseURL, token: credential.token)
         guard harnesses.contains(where: \.available) else {
+            return .noAvailableHarness(credential)
+        }
+        return .paired(PairedServer(url: credential.baseURL, token: credential.token, harnesses: harnesses))
+    }
+
+    func pairAttempt(_ payload: ServerPairingPayload) async throws -> ServerPairingAttempt {
+        try await authenticate(claim(payload))
+    }
+
+    func pair(_ payload: ServerPairingPayload) async throws -> PairedServer {
+        switch try await pairAttempt(payload) {
+        case .paired(let server):
+            return server
+        case .noAvailableHarness:
             throw ServerPairingError.noAvailableHarness
         }
-
-        return PairedServer(url: payload.baseURL, token: token, harnesses: harnesses)
     }
 }

@@ -49,47 +49,137 @@ final class PairServerSheetModel {
     private(set) var isPairing = false
     private(set) var didPair = false
     private(set) var failure: Failure?
+    private(set) var isActive = true
+    private var pairingTask: Task<Void, Never>?
+    private var claimedCredential: ClaimedServerCredential?
+    private let coordinator: ServerPairingCoordinator
 
     var canRetry: Bool { failure != nil && !didPair }
+    var hasClaimedCredential: Bool { claimedCredential != nil }
 
     init(client: any ServerPairingClient, onPaired: @escaping (PairedServer) -> Void) {
         self.client = client
         self.onPaired = onPaired
+        self.coordinator = ServerPairingCoordinator(client: client)
+    }
+
+    func activate() {
+        isActive = true
+    }
+
+    func deactivate() {
+        isActive = false
+        pairingTask?.cancel()
+        pairingTask = nil
+        isPairing = false
+    }
+
+    func cancelPairing() {
+        deactivate()
+        claimedCredential = nil
+        failure = nil
+    }
+
+    @discardableResult
+    func startPairing(_ code: String) -> Task<Void, Never>? {
+        guard isActive, !isPairing, !didPair else { return nil }
+        pairingTask?.cancel()
+        claimedCredential = nil
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.handleCode(code)
+        }
+        pairingTask = task
+        return task
     }
 
     func handleCode(_ code: String) async {
-        guard !isPairing, !didPair else { return }
+        guard isActive, !isPairing, !didPair else { return }
 
         let payload: ServerPairingPayload
         do {
             payload = try ServerPairingPayload(qrString: code)
         } catch {
+            guard isActive, !Task.isCancelled else { return }
             failure = .invalidCode
             return
         }
 
+        claimedCredential = nil
         isPairing = true
         failure = nil
-        defer { isPairing = false }
+        defer {
+            if !Task.isCancelled { isPairing = false }
+        }
 
         do {
-            let paired = try await ServerPairingCoordinator(client: client).pair(payload)
-            guard !didPair else { return }
-            didPair = true
-            onPaired(paired)
+            let attempt = try await coordinator.pairAttempt(payload)
+            guard isActive, !Task.isCancelled, !didPair else { return }
+            consume(attempt)
         } catch {
+            guard isActive, !Task.isCancelled, !didPair else { return }
             failure = Self.failure(for: error)
         }
     }
 
+    func retryClaimedHarnesses() async {
+        guard isActive, !isPairing, !didPair, let credential = claimedCredential else { return }
+
+        isPairing = true
+        failure = nil
+        defer {
+            if !Task.isCancelled { isPairing = false }
+        }
+
+        do {
+            let attempt = try await coordinator.authenticate(credential)
+            guard isActive, !Task.isCancelled, !didPair else { return }
+            consume(attempt)
+        } catch {
+            guard isActive, !Task.isCancelled, !didPair else { return }
+            failure = Self.failure(for: error)
+        }
+    }
+
+    @discardableResult
+    func startRetryClaimedHarnesses() -> Task<Void, Never>? {
+        guard hasClaimedCredential, isActive, !isPairing, !didPair else { return nil }
+        pairingTask?.cancel()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.retryClaimedHarnesses()
+        }
+        pairingTask = task
+        return task
+    }
+
     func handleScannerFailure(_ message: String) {
-        guard !didPair else { return }
+        guard isActive, !didPair else { return }
         failure = .cameraAccess(message)
     }
 
-    func retry() {
+    func resetScanner() {
         guard !didPair else { return }
+        pairingTask?.cancel()
+        pairingTask = nil
+        isPairing = false
         failure = nil
+    }
+
+    func retry() {
+        resetScanner()
+    }
+
+    private func consume(_ attempt: ServerPairingAttempt) {
+        switch attempt {
+        case .paired(let paired):
+            claimedCredential = nil
+            didPair = true
+            onPaired(paired)
+        case .noAvailableHarness(let credential):
+            claimedCredential = credential
+            failure = .noHarness
+        }
     }
 
     private static func failure(for error: Error) -> Failure {
@@ -108,6 +198,49 @@ final class PairServerSheetModel {
             }
         }
         return .expiredOrUnavailable
+    }
+}
+
+final class CaptureSessionLifecycle {
+    private let queue: DispatchQueue
+    private let startOnQueue: () -> Void
+    private let stopOnQueue: () -> Void
+    private var pendingActivation: DispatchWorkItem?
+
+    init(
+        queue: DispatchQueue,
+        startOnQueue: @escaping () -> Void,
+        stopOnQueue: @escaping () -> Void
+    ) {
+        self.queue = queue
+        self.startOnQueue = startOnQueue
+        self.stopOnQueue = stopOnQueue
+    }
+
+    func activate(configuration: @escaping () -> Bool) {
+        pendingActivation?.cancel()
+        let box = WorkItemBox()
+        let work = DispatchWorkItem { [startOnQueue] in
+            guard let work = box.item, !work.isCancelled else { return }
+            guard configuration() else { return }
+            guard !work.isCancelled else { return }
+            startOnQueue()
+        }
+        box.item = work
+        pendingActivation = work
+        queue.async(execute: work)
+    }
+
+    func deactivate() {
+        pendingActivation?.cancel()
+        pendingActivation = nil
+        queue.async { [stopOnQueue] in
+            stopOnQueue()
+        }
+    }
+
+    private final class WorkItemBox {
+        var item: DispatchWorkItem?
     }
 }
 
@@ -133,9 +266,17 @@ struct QRCodeScanner: UIViewControllerRepresentable {
         private let onCode: (String) -> Void
         private let onFailure: (String) -> Void
         private let session = AVCaptureSession()
+        private let captureQueue = DispatchQueue(label: "com.harnessvoice.qr-capture")
+        private lazy var lifecycle = CaptureSessionLifecycle(
+            queue: captureQueue,
+            startOnQueue: { [session] in session.startRunning() },
+            stopOnQueue: { [session] in session.stopRunning() }
+        )
         private var previewLayer: AVCaptureVideoPreviewLayer?
         private var hasEmittedCode = false
-        private var configured = false
+        private var configurationRequested = false
+        private var isActive = false
+        private var activationID = UUID()
 
         init(onCode: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
             self.onCode = onCode
@@ -143,19 +284,25 @@ struct QRCodeScanner: UIViewControllerRepresentable {
         }
 
         func configure(in view: UIView) {
-            guard !configured else {
+            isActive = true
+            let activation = UUID()
+            activationID = activation
+            guard !configurationRequested else {
                 previewLayer?.frame = view.bounds
                 return
             }
+
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
-                configureSession(in: view)
+                configureSession(in: view, activation: activation)
             case .notDetermined:
                 AVCaptureDevice.requestAccess(for: .video) { [weak self, weak view] granted in
                     DispatchQueue.main.async {
-                        guard let self, let view else { return }
+                        guard let self, let view,
+                              self.isActive,
+                              self.activationID == activation else { return }
                         if granted {
-                            self.configureSession(in: view)
+                            self.configureSession(in: view, activation: activation)
                         } else {
                             self.onFailure(Self.cameraAccessMessage)
                         }
@@ -168,18 +315,11 @@ struct QRCodeScanner: UIViewControllerRepresentable {
             }
         }
 
-        func start() {
-            guard configured, !session.isRunning, !hasEmittedCode else { return }
-            DispatchQueue.global(qos: .userInitiated).async { [session] in
-                session.startRunning()
-            }
-        }
-
         func stop() {
-            guard session.isRunning else { return }
-            DispatchQueue.global(qos: .userInitiated).async { [session] in
-                session.stopRunning()
-            }
+            isActive = false
+            activationID = UUID()
+            configurationRequested = false
+            lifecycle.deactivate()
         }
 
         func metadataOutput(
@@ -196,39 +336,60 @@ struct QRCodeScanner: UIViewControllerRepresentable {
             else { return }
 
             hasEmittedCode = true
-            stop()
-            onCode(code)
+            session.stopRunning()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isActive else { return }
+                self.onCode(code)
+            }
         }
 
-        private func configureSession(in view: UIView) {
-            guard !configured else { return }
-            guard let device = AVCaptureDevice.default(for: .video) else {
-                onFailure("This device has no camera available for QR scanning.")
-                return
-            }
-            do {
-                let input = try AVCaptureDeviceInput(device: device)
-                let output = AVCaptureMetadataOutput()
-                guard session.canAddInput(input), session.canAddOutput(output) else {
-                    onFailure("The camera could not be configured for QR scanning.")
-                    return
+        private func configureSession(in view: UIView, activation: UUID) {
+            guard !configurationRequested else { return }
+            configurationRequested = true
+            lifecycle.activate { [weak self, weak view] in
+                guard let self else { return false }
+                guard let device = AVCaptureDevice.default(for: .video) else {
+                    self.reportFailure("This device has no camera available for QR scanning.", activation: activation)
+                    return false
                 }
-                session.beginConfiguration()
-                session.addInput(input)
-                session.addOutput(output)
-                output.setMetadataObjectsDelegate(self, queue: .main)
-                output.metadataObjectTypes = [.qr]
-                session.commitConfiguration()
+                do {
+                    let input = try AVCaptureDeviceInput(device: device)
+                    let output = AVCaptureMetadataOutput()
+                    guard self.session.canAddInput(input), self.session.canAddOutput(output) else {
+                        self.reportFailure("The camera could not be configured for QR scanning.", activation: activation)
+                        return false
+                    }
+                    self.session.beginConfiguration()
+                    self.session.addInput(input)
+                    self.session.addOutput(output)
+                    output.setMetadataObjectsDelegate(self, queue: self.captureQueue)
+                    output.metadataObjectTypes = [.qr]
+                    self.session.commitConfiguration()
 
-                let previewLayer = AVCaptureVideoPreviewLayer(session: session)
-                previewLayer.videoGravity = .resizeAspectFill
-                previewLayer.frame = view.bounds
-                view.layer.insertSublayer(previewLayer, at: 0)
-                self.previewLayer = previewLayer
-                configured = true
-                start()
-            } catch {
-                onFailure("The camera could not be configured for QR scanning.")
+                    DispatchQueue.main.async { [weak self, weak view] in
+                        guard let self, let view,
+                              self.isActive,
+                              self.activationID == activation else { return }
+                        let previewLayer = AVCaptureVideoPreviewLayer(session: self.session)
+                        previewLayer.videoGravity = .resizeAspectFill
+                        previewLayer.frame = view.bounds
+                        view.layer.insertSublayer(previewLayer, at: 0)
+                        self.previewLayer = previewLayer
+                    }
+                    return true
+                } catch {
+                    self.reportFailure("The camera could not be configured for QR scanning.", activation: activation)
+                    return false
+                }
+            }
+        }
+
+        private func reportFailure(_ message: String, activation: UUID) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.isActive,
+                      self.activationID == activation else { return }
+                self.onFailure(message)
             }
         }
 
@@ -307,6 +468,8 @@ struct PairServerSheet: View {
         }
         .tint(HVColor.amber)
         .preferredColorScheme(.dark)
+        .onAppear { model.activate() }
+        .onDisappear { model.deactivate() }
         .onChange(of: model.failure) { _, newValue in
             showingFailureAlert = newValue != nil
         }
@@ -319,7 +482,7 @@ struct PairServerSheet: View {
             }
             Button("Retry scanning") { retryScanning() }
             Button("Manual setup") { showManualSetup() }
-            Button("Cancel", role: .cancel) { model.retry() }
+            Button("Cancel", role: .cancel) { restoreScanner() }
         } message: {
             Text(model.failure?.message ?? "Try scanning the pairing code again.")
         }
@@ -330,26 +493,31 @@ struct PairServerSheet: View {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
                     Image(systemName: "desktopcomputer.and.arrow.down")
-                        .font(.system(size: 30, weight: .semibold))
+                        .font(.title2.weight(.semibold))
                         .foregroundStyle(HVColor.amber)
+                        .accessibilityHidden(true)
                     Text("SET UP ON YOUR MAC")
-                        .font(HVFont.title)
+                        .font(.title3.monospaced().weight(.semibold))
                         .tracking(0.8)
                         .foregroundStyle(HVColor.amber)
                     Text("Run the local provisioner on the Mac that hosts your harness. It starts the server and displays a one-time pairing QR code.")
-                        .font(HVFont.body)
+                        .font(.body.monospaced())
                         .foregroundStyle(HVColor.creamDim)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Text("The server can be reached on the same Wi-Fi or through Tailscale. Keep the QR code private while pairing; it expires after use.")
-                    .font(HVFont.captionTiny)
+                    .font(.footnote.monospaced())
                     .foregroundStyle(HVColor.creamDim)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Button(action: copySetupPrompt) {
-                    Label(didCopyPrompt ? "Setup prompt copied" : "Copy setup prompt", systemImage: didCopyPrompt ? "checkmark" : "doc.on.doc")
-                        .frame(maxWidth: .infinity)
+                    HStack {
+                        Image(systemName: didCopyPrompt ? "checkmark" : "doc.on.doc")
+                            .accessibilityHidden(true)
+                        Text(didCopyPrompt ? "Setup prompt copied" : "Copy setup prompt")
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel(didCopyPrompt ? "Setup prompt copied" : "Copy setup prompt")
@@ -357,7 +525,8 @@ struct PairServerSheet: View {
 
                 Button("Continue to scan") {
                     step = .scan
-                    model.retry()
+                    model.activate()
+                    model.resetScanner()
                     scannerID = UUID()
                 }
                 .frame(maxWidth: .infinity)
@@ -374,7 +543,7 @@ struct PairServerSheet: View {
         VStack(spacing: 18) {
             QRCodeScanner(
                 onCode: { code in
-                    Task { await model.handleCode(code) }
+                    model.startPairing(code)
                 },
                 onFailure: { message in
                     model.handleScannerFailure(message)
@@ -393,16 +562,20 @@ struct PairServerSheet: View {
             .accessibilityHint("Point the camera at the local server pairing QR code")
 
             Text(model.isPairing ? "Pairing with your server…" : "Point your camera at the one-time pairing QR code.")
-                .font(HVFont.body)
+                .font(.body.monospaced())
                 .foregroundStyle(HVColor.creamDim)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
             if model.didPair {
-                Label("Server paired", systemImage: "checkmark.circle.fill")
-                    .font(HVFont.body.weight(.semibold))
-                    .foregroundStyle(HVColor.amber)
-                    .accessibilityLabel("Server paired successfully")
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .accessibilityHidden(true)
+                    Text("Server paired")
+                }
+                .font(.body.monospaced().weight(.semibold))
+                .foregroundStyle(HVColor.amber)
+                .accessibilityLabel("Server paired successfully")
             }
 
             manualFallbackButton
@@ -424,14 +597,27 @@ struct PairServerSheet: View {
     }
 
     private func retryScanning() {
-        model.retry()
+        let retryClaim = model.hasClaimedCredential
+        model.resetScanner()
+        model.activate()
+        showingFailureAlert = false
+        step = .scan
+        scannerID = UUID()
+        if retryClaim {
+            model.startRetryClaimedHarnesses()
+        }
+    }
+
+    private func restoreScanner() {
+        model.resetScanner()
+        model.activate()
         showingFailureAlert = false
         step = .scan
         scannerID = UUID()
     }
 
     private func showManualSetup() {
-        model.retry()
+        model.cancelPairing()
         showingFailureAlert = false
         step = .setup
     }
