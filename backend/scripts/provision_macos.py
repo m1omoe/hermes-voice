@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import getpass
 import json
 import os
 import platform
@@ -51,6 +50,7 @@ class CommandRunner(Protocol):
         *,
         env: dict[str, str] | None = None,
         input: str | None = None,
+        capture_output: bool = True,
     ) -> CommandResult: ...
 
 
@@ -82,16 +82,19 @@ class SubprocessRunner:
         *,
         env: dict[str, str] | None = None,
         input: str | None = None,
+        capture_output: bool = True,
     ) -> CommandResult:
         completed = subprocess.run(
             args,
             check=False,
-            capture_output=True,
+            capture_output=capture_output,
             text=True,
             input=input,
             env=env,
         )
-        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+        return CommandResult(
+            completed.returncode, completed.stdout or "", completed.stderr or ""
+        )
 
     def health(self, url: str) -> dict[str, object]:
         try:
@@ -227,10 +230,15 @@ class _SecurityFrameworkKeychain:
 
 class SecurityKeychain:
     def __init__(
-        self, api: NativeKeychainAPI | None = None, user: str | None = None
+        self,
+        api: NativeKeychainAPI | None = None,
+        user: str | None = None,
+        account: str | None = None,
     ) -> None:
         self._api = api
-        self._account = (user or os.environ.get("USER") or getpass.getuser()).encode()
+        self._account = (
+            account if account is not None else user if user is not None else str(os.getuid())
+        ).encode()
 
     def set(self, service: str, token: str) -> None:
         try:
@@ -263,7 +271,8 @@ class MacProvisioner:
     ) -> None:
         self.layout = layout
         self.runner = runner or SubprocessRunner()
-        self.keychain = keychain or SecurityKeychain()
+        self.user_id = os.getuid() if user_id is None else user_id
+        self.keychain = keychain or SecurityKeychain(account=str(self.user_id))
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
         self.writer = writer or LocalFileWriter()
@@ -273,7 +282,6 @@ class MacProvisioner:
         self.token_factory = token_factory
         self.pairing_store = pairing_store
         self.output = output
-        self.user_id = os.getuid() if user_id is None else user_id
         self.tailscale = tailscale
 
     @classmethod
@@ -344,11 +352,11 @@ class MacProvisioner:
         token = self.env.get("HERMES_VOICE_TOKEN") if from_bws_child else self.token_factory()
         if not token:
             raise ProvisioningError("no server token was provided")
-        self.keychain.set(KEYCHAIN_SERVICE, token)
-
         self.output("Install and start the Harness Voice LaunchAgents.")
         if not self.confirm("install and start the LaunchAgents"):
             raise ProvisioningError("LaunchAgent installation cancelled")
+        self._unload_existing_agents(layout)
+        self.keychain.set(KEYCHAIN_SERVICE, token)
         self._write_assets(layout, tailscale)
         self._start_agents(layout)
         self._require_https_health(layout)
@@ -426,12 +434,26 @@ class MacProvisioner:
         launch_agents = layout.home / "Library/LaunchAgents"
         backend_plist = launch_agents / f"{layout.backend_label}.plist"
         renew_plist = launch_agents / f"{layout.renew_label}.plist"
-        self.writer.write_text(wrapper, render_backend_wrapper(layout, KEYCHAIN_SERVICE))
+        self.writer.write_text(
+            wrapper,
+            render_backend_wrapper(layout, KEYCHAIN_SERVICE, str(self.user_id)),
+        )
         self.writer.chmod(wrapper, 0o755)
         self.writer.write_text(renew, render_renew_script(layout, tailscale))
         self.writer.chmod(renew, 0o755)
         self.writer.write_text(backend_plist, render_backend_plist(layout, wrapper))
         self.writer.write_text(renew_plist, render_renew_plist(layout, renew))
+
+    def _unload_existing_agents(self, layout: MacServerLayout) -> None:
+        uid = f"gui/{self.user_id}"
+        for label in (layout.backend_label, layout.renew_label):
+            service = f"{uid}/{label}"
+            result = self.runner.run(["launchctl", "print", service])
+            if result.returncode == 0:
+                self._run_checked(
+                    ["launchctl", "bootout", service],
+                    "existing LaunchAgent shutdown",
+                )
 
     def _start_agents(self, layout: MacServerLayout) -> None:
         uid = f"gui/{self.user_id}"
@@ -486,7 +508,7 @@ class MacProvisioner:
         ]
         env = {key: value for key, value in self.env.items() if key != "HERMES_VOICE_TOKEN"}
         try:
-            result = self.runner.run(args, env=env)
+            result = self.runner.run(args, env=env, capture_output=False)
         except OSError as exc:
             raise ProvisioningError(
                 "bws-project is unavailable; install it and check the project registration"

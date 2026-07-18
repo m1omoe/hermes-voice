@@ -70,9 +70,11 @@ def test_backend_plist_escapes_dynamic_paths(tmp_path: Path) -> None:
 def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
-    rendered = render_backend_wrapper(layout, "custom-service")
+    rendered = render_backend_wrapper(layout, "custom-service", "501")
 
-    assert 'security find-generic-password -a "$USER" -s custom-service -w' in rendered
+    assert "security find-generic-password -a 501" in rendered
+    assert "-s custom-service -w" in rendered
+    assert 'security find-generic-password -a "$USER"' not in rendered
     assert 'HERMES_VOICE_TOKEN="$TOKEN"' in rendered
     assert 'HERMES_VOICE_DISABLE_DOTENV="1"' in rendered
     assert "exec env" not in rendered
@@ -204,6 +206,7 @@ class FakeRunner:
         self.health_bodies = health_bodies
         self.health_calls = 0
         self.calls: list[tuple[list[str], dict[str, str] | None, str | None]] = []
+        self.capture_output: list[bool] = []
 
     def which(self, name: str) -> str | None:
         if name == "uv" and self.uv:
@@ -218,8 +221,10 @@ class FakeRunner:
         *,
         env: dict[str, str] | None = None,
         input: str | None = None,
+        capture_output: bool = True,
     ) -> CommandResult:
         self.calls.append((args, env, input))
+        self.capture_output.append(capture_output)
         if "cert" in args:
             return CommandResult(0 if self.cert_ok else 1, "", "certificate failed")
         if args[:2] == ["bws-project", "run"]:
@@ -457,6 +462,20 @@ def test_security_keychain_uses_native_boundary_not_security_stdin(
     assert all(token not in arg for argv in subprocess_argv for arg in argv)
 
 
+def test_security_keychain_accepts_the_uid_derived_account() -> None:
+    native_calls: list[tuple[bytes, bytes, bytes]] = []
+
+    class FakeNativeAPI:
+        def set_generic_password(
+            self, service: bytes, account: bytes, password: bytes
+        ) -> None:
+            native_calls.append((service, account, password))
+
+    SecurityKeychain(api=FakeNativeAPI(), account="501").set("service", "token")
+
+    assert native_calls == [(b"service", b"501", b"token")]
+
+
 def test_provisioned_backend_explicitly_skips_dotenv_loading(monkeypatch) -> None:
     import app.config as config
 
@@ -545,6 +564,57 @@ def test_setup_from_bws_delegates_without_secret_in_command_or_environment(
     assert runner.calls[0][0][:3] == ["bws-project", "run", "--"]
     assert token not in runner.calls[0][0]
     assert token not in (runner.calls[0][1] or {})
+
+
+def test_bws_child_keeps_interactive_io_visible_and_unsuppressed(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    provisioner.setup(from_bws=True)
+
+    assert runner.capture_output[0] is False
+    assert runner.calls[0][2] is None
+
+
+def test_setup_unloads_existing_agents_before_replacing_keychain_token(tmp_path: Path) -> None:
+    class ExistingAgentRunner(FakeRunner):
+        def run(
+            self,
+            args: list[str],
+            *,
+            env: dict[str, str] | None = None,
+            input: str | None = None,
+            capture_output: bool = True,
+        ) -> CommandResult:
+            result = super().run(
+                args, env=env, input=input, capture_output=capture_output
+            )
+            if args[:2] == ["launchctl", "print"]:
+                return CommandResult(0, "loaded", "")
+            return result
+
+    runner = ExistingAgentRunner()
+    provisioner, keychain, _ = make_provisioner(tmp_path, runner)
+
+    provisioner.setup()
+
+    operations = [call[0][:2] for call in runner.calls if call[0][0] == "launchctl"]
+    assert operations[:4] == [
+        ["launchctl", "print"],
+        ["launchctl", "bootout"],
+        ["launchctl", "print"],
+        ["launchctl", "bootout"],
+    ]
+    bootout_indexes = [
+        index for index, call in enumerate(runner.calls) if call[0][:2] == ["launchctl", "bootout"]
+    ]
+    keychain_call_index = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call[0][:2] == ["launchctl", "bootstrap"]
+    )
+    assert all(index < keychain_call_index for index in bootout_indexes)
+    assert keychain.saved == [("HERMES_VOICE_TOKEN", "public-token")]
 
 
 def test_setup_from_bws_reports_missing_bws_without_traceback(tmp_path: Path) -> None:

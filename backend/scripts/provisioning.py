@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import plistlib
 import shlex
 from dataclasses import dataclass
@@ -25,9 +26,14 @@ def _render_plist(payload: dict[str, object]) -> str:
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML).decode()
 
 
-def render_backend_wrapper(layout: MacServerLayout, keychain_service: str) -> str:
+def render_backend_wrapper(
+    layout: MacServerLayout,
+    keychain_service: str,
+    keychain_account: str | None = None,
+) -> str:
     cert_path, key_path = _certificate_paths(layout)
     security_service = shlex.quote(keychain_service)
+    security_account = shlex.quote(keychain_account or str(os.getuid()))
     uv_path = shlex.quote(str(layout.uv))
     backend_dir = shlex.quote(str(layout.repo_root / "backend"))
     cert_path = shlex.quote(str(cert_path))
@@ -37,7 +43,8 @@ def render_backend_wrapper(layout: MacServerLayout, keychain_service: str) -> st
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
-TOKEN="$(security find-generic-password -a "$USER" -s {security_service} -w 2>/dev/null || true)"
+TOKEN="$(security find-generic-password -a {security_account} \
+    -s {security_service} -w 2>/dev/null || true)"
 if [[ -z "$TOKEN" ]]; then
     echo "Keychain lookup returned no backend token" >&2
     exit 1
