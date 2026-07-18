@@ -7,7 +7,7 @@
 - [x] Pairing ticket store + claim API. Verify: `uv run --directory backend pytest tests/test_pairing.py -v` (19 pairing tests; full backend 237 passed; Fable re-review SHIP)
 - [x] Portable launchd renderer — committed `8a920ad` + hardening `b8de192`, `398c603`; task review clean after two security fixes. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (8 passed; ruff clean; no maintainer-path matches).
 - [x] Guided provisioner + terminal QR — `310b4a3..b65c31d`; task review clean after security hardening. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (38 focused; 276 backend total; ruff clean).
-- [x] iOS pairing payload + claim client. Verify: focused `ServerPairingTests` 11/11 passed; full iOS target 112/112 passed via the same scheme/destination.
+- [x] iOS pairing payload + claim client — `1006cbe`, `9c086d6`; task review clean. Verify: focused `ServerPairingTests` 15/15; full iOS target 116/116 via the same scheme/destination.
 - [ ] iOS QR scanner/setup sheet. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:HermesVoiceTests/ServerPairingTests test`
 - [ ] Wire onboarding + server manager. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
 - [ ] Docs + full automated regression. Verify: `uv run --directory backend pytest` and `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
