@@ -72,6 +72,9 @@ targets:
         NSMicrophoneUsageDescription: >-
           Harness Voice needs the microphone to capture what you say and send it
           to your local agent.
+        NSCameraUsageDescription: >-
+          Harness Voice uses the camera only to scan a local server pairing QR
+          code.
         # Required since iOS 14 for any connection to a "local" network
         # address. This includes private RFC1918 ranges AND Tailscale
         # (100.64.0.0/10 CGNAT). Without this, iOS silently refuses local

@@ -142,6 +142,42 @@ final class ServerPairingTests: XCTestCase {
         XCTAssertThrowsError(try ServerPairingPayload(qrString: invalidCharacters))
     }
 
+    @MainActor
+    func testPairingModelRejectsInvalidQRCodeWithoutCallingClient() async {
+        let fake = FakePairingClient()
+        let model = PairServerSheetModel(client: fake) { _ in }
+
+        await model.handleCode("not-a-pairing-code")
+
+        XCTAssertEqual(fake.calls, [])
+        XCTAssertEqual(model.failure, .invalidCode)
+    }
+
+    @MainActor
+    func testPairingModelExposesRetryableFailureAfterClaimFailure() async throws {
+        let fake = FakePairingClient(claimResult: .failure(TestError.failed))
+        let model = PairServerSheetModel(client: fake) { _ in }
+
+        await model.handleCode(validQR)
+
+        XCTAssertEqual(fake.calls, [.claim])
+        XCTAssertEqual(model.failure, .expiredOrUnavailable)
+        XCTAssertTrue(model.canRetry)
+    }
+
+    @MainActor
+    func testPairingModelInvokesOnPairedOnceForDuplicateScans() async {
+        let fake = FakePairingClient(listResult: .success([availableHermes]))
+        var pairedCount = 0
+        let model = PairServerSheetModel(client: fake) { _ in pairedCount += 1 }
+
+        await model.handleCode(validQR)
+        await model.handleCode(validQR)
+
+        XCTAssertEqual(pairedCount, 1)
+        XCTAssertEqual(fake.calls, [.claim, .listHarnesses])
+    }
+
     func testCoordinatorClaimsThenAuthenticates() async throws {
         let fake = FakePairingClient(
             listResult: .success([availableHermes])
