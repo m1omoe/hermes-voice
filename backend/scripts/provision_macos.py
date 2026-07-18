@@ -30,6 +30,9 @@ from scripts.provisioning import (
 
 KEYCHAIN_SERVICE = "HERMES_VOICE_TOKEN"
 DEFAULT_PORT = 8765
+HEALTH_TIMEOUT = 30.0
+HEALTH_INTERVAL = 1.0
+TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 CERT_CONTAINER = Path("Library/Containers/io.tailscale.ipn.macos/Data")
 
 
@@ -132,6 +135,7 @@ class MacProvisioner:
         runner: CommandRunner | None = None,
         keychain: Keychain | None = None,
         clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
         writer: FileWriter | None = None,
         confirm: Callable[[str], bool] | None = None,
         platform_name: str | None = None,
@@ -146,6 +150,7 @@ class MacProvisioner:
         self.runner = runner or SubprocessRunner()
         self.keychain = keychain or SecurityKeychain(self.runner)
         self.clock = clock or time.time
+        self.sleeper = sleeper or time.sleep
         self.writer = writer or LocalFileWriter()
         self.confirm = confirm or self._interactive_confirm
         self.platform_name = platform_name or platform.system()
@@ -172,10 +177,8 @@ class MacProvisioner:
         if uv is None:
             raise ProvisioningError("uv is required; install uv and try again")
         tailscale = cls._which(runner, "tailscale")
-        if tailscale is None and not hasattr(runner, "which"):
-            app_path = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
-            if app_path.is_file():
-                tailscale = str(app_path)
+        if tailscale is None and TAILSCALE_APP_PATH.is_file():
+            tailscale = str(TAILSCALE_APP_PATH)
         if tailscale is None:
             raise ProvisioningError("Tailscale is required; install and sign in first")
         dns_name = cls._detect_dns(runner, Path(tailscale))
@@ -219,7 +222,7 @@ class MacProvisioner:
         self.output("Install and start the Harness Voice LaunchAgents.")
         if not self.confirm("install and start the LaunchAgents"):
             raise ProvisioningError("LaunchAgent installation cancelled")
-        self._write_assets(layout)
+        self._write_assets(layout, tailscale)
         self._start_agents(layout)
         self._require_https_health(layout)
         self.output(f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}")
@@ -290,7 +293,7 @@ class MacProvisioner:
             )
         return layout, tailscale
 
-    def _write_assets(self, layout: MacServerLayout) -> None:
+    def _write_assets(self, layout: MacServerLayout, tailscale: Path) -> None:
         wrapper = layout.support_dir / "run-backend"
         renew = layout.support_dir / "renew-cert"
         launch_agents = layout.home / "Library/LaunchAgents"
@@ -298,7 +301,7 @@ class MacProvisioner:
         renew_plist = launch_agents / f"{layout.renew_label}.plist"
         self.writer.write_text(wrapper, render_backend_wrapper(layout, KEYCHAIN_SERVICE))
         self.writer.chmod(wrapper, 0o755)
-        self.writer.write_text(renew, render_renew_script(layout))
+        self.writer.write_text(renew, render_renew_script(layout, tailscale))
         self.writer.chmod(renew, 0o755)
         self.writer.write_text(backend_plist, render_backend_plist(layout, wrapper))
         self.writer.write_text(renew_plist, render_renew_plist(layout, renew))
@@ -323,9 +326,22 @@ class MacProvisioner:
 
     def _require_https_health(self, layout: MacServerLayout) -> None:
         url = self._health_url(layout)
-        health = self._health(url)
-        if health.get("status") != "ok" or health.get("scheme") != "https":
-            raise ProvisioningError("HTTPS health check is not ready")
+        deadline = self.clock() + HEALTH_TIMEOUT
+        last_error: ProvisioningError | None = None
+        while True:
+            try:
+                health = self._health(url)
+            except ProvisioningError as exc:
+                last_error = exc
+            else:
+                if health.get("status") == "ok" and health.get("scheme") == "https":
+                    return
+                last_error = ProvisioningError("HTTPS health check is not ready")
+
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise last_error
+            self.sleeper(min(HEALTH_INTERVAL, remaining))
 
     def _health(self, url: str) -> dict[str, object]:
         health = getattr(self.runner, "health", None)
@@ -349,7 +365,12 @@ class MacProvisioner:
             "--from-bws-child",
         ]
         env = {key: value for key, value in self.env.items() if key != "HERMES_VOICE_TOKEN"}
-        result = self.runner.run(args, env=env)
+        try:
+            result = self.runner.run(args, env=env)
+        except OSError as exc:
+            raise ProvisioningError(
+                "bws-project is unavailable; install it and check the project registration"
+            ) from exc
         if result.returncode:
             raise ProvisioningError(
                 "bws-project could not provide the registered server token; "
@@ -365,8 +386,8 @@ class MacProvisioner:
         if self.tailscale is not None:
             return self.tailscale
         found = self._which(self.runner, "tailscale")
-        if found is None and not hasattr(self.runner, "which"):
-            found = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+        if found is None and TAILSCALE_APP_PATH.is_file():
+            found = str(TAILSCALE_APP_PATH)
         if found is None:
             raise ProvisioningError("Tailscale is required; install and sign in first")
         return Path(found)

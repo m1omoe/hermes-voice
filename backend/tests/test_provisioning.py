@@ -120,6 +120,16 @@ def test_backend_wrapper_uses_shared_generated_certificate_paths(tmp_path: Path)
     assert f"HERMES_VOICE_KEY={shlex.quote(str(layout.support_dir / 'server.key'))}" in rendered
 
 
+def test_renew_script_uses_the_discovered_tailscale_executable(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    tailscale = Path("/opt/custom/bin/tailscale")
+
+    rendered = render_renew_script(layout, tailscale)
+
+    assert f"TAILSCALE={shlex.quote(str(tailscale))}" in rendered
+    assert "/Applications/Tailscale.app/Contents/MacOS/Tailscale" not in rendered
+
+
 def test_renew_script_renews_and_restarts_generated_backend(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
@@ -177,14 +187,19 @@ class FakeRunner:
         dns_name: str = "mandalore.tailnet.ts.net.",
         cert_ok: bool = True,
         bws_ok: bool = True,
+        bws_missing: bool = False,
         health_body: dict | None = None,
+        health_bodies: list[dict] | None = None,
     ) -> None:
         self.uv = uv
         self.tailscale = tailscale
         self.dns_name = dns_name
         self.cert_ok = cert_ok
         self.bws_ok = bws_ok
+        self.bws_missing = bws_missing
         self.health_body = health_body or {"status": "ok", "scheme": "https"}
+        self.health_bodies = health_bodies
+        self.health_calls = 0
         self.calls: list[tuple[list[str], dict[str, str] | None, str | None]] = []
 
     def which(self, name: str) -> str | None:
@@ -205,6 +220,8 @@ class FakeRunner:
         if "cert" in args:
             return CommandResult(0 if self.cert_ok else 1, "", "certificate failed")
         if args[:2] == ["bws-project", "run"]:
+            if self.bws_missing:
+                raise FileNotFoundError("bws-project")
             return CommandResult(0 if self.bws_ok else 1, "", "bws unavailable")
         if "status" in args and "--json" in args:
             return CommandResult(
@@ -215,7 +232,23 @@ class FakeRunner:
         return CommandResult(0, "", "")
 
     def health(self, url: str) -> dict:
+        self.health_calls += 1
+        if self.health_bodies:
+            return self.health_bodies.pop(0)
         return self.health_body
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class FakeKeychain:
@@ -251,19 +284,25 @@ def make_provisioner(
     token_factory=lambda: "public-token",
     env: dict[str, str] | None = None,
     platform_name: str = "Darwin",
+    clock=None,
+    sleeper=None,
 ) -> tuple[MacProvisioner, FakeKeychain, FakeWriter]:
     keychain = FakeKeychain()
     writer = FakeWriter()
-    provisioner = MacProvisioner(
-        layout=make_layout(tmp_path),
-        runner=runner,
-        keychain=keychain,
-        writer=writer,
-        confirm=lambda _: True,
-        token_factory=token_factory,
-        platform_name=platform_name,
-        env=env,
-    )
+    provisioner_args = {
+        "layout": make_layout(tmp_path),
+        "runner": runner,
+        "keychain": keychain,
+        "writer": writer,
+        "confirm": lambda _: True,
+        "token_factory": token_factory,
+        "platform_name": platform_name,
+        "env": env,
+        "clock": clock,
+    }
+    if sleeper is not None:
+        provisioner_args["sleeper"] = sleeper
+    provisioner = MacProvisioner(**provisioner_args)
     return provisioner, keychain, writer
 
 
@@ -274,7 +313,8 @@ def test_setup_rejects_non_macos(tmp_path: Path) -> None:
         provisioner.setup()
 
 
-def test_setup_stops_when_tailscale_is_missing(tmp_path: Path) -> None:
+def test_setup_stops_when_tailscale_is_missing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "is_file", lambda path: False)
     provisioner, _, _ = make_provisioner(tmp_path, FakeRunner(tailscale=False))
 
     with pytest.raises(ProvisioningError, match="Tailscale"):
@@ -286,6 +326,23 @@ def test_setup_stops_when_uv_is_missing(tmp_path: Path) -> None:
 
     with pytest.raises(ProvisioningError, match="uv"):
         provisioner.setup()
+
+
+def test_discover_uses_tailscale_app_bundle_when_path_lookup_is_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = FakeRunner(tailscale=False)
+    app_path = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+    monkeypatch.setattr(Path, "is_file", lambda path: path == app_path)
+
+    MacProvisioner.discover(
+        runner=runner,
+        home=tmp_path / "home",
+        repo_root=tmp_path / "checkout",
+        platform_name="Darwin",
+    )
+
+    assert any(call[0] == [str(app_path), "status", "--json"] for call in runner.calls)
 
 
 def test_discovery_normalizes_magic_dns_trailing_dot(tmp_path: Path) -> None:
@@ -337,6 +394,48 @@ def test_setup_refuses_to_continue_after_certificate_failure(tmp_path: Path) -> 
     assert not any("launchctl" in call[0] for call in runner.calls)
 
 
+def test_setup_passes_discovered_tailscale_to_renewal_asset(tmp_path: Path) -> None:
+    provisioner, _, writer = make_provisioner(tmp_path, FakeRunner())
+
+    provisioner.setup()
+
+    rendered = writer.text[make_layout(tmp_path).support_dir / "renew-cert"]
+    assert "TAILSCALE=/opt/custom/bin/tailscale" in rendered
+    assert "/Applications/Tailscale.app/Contents/MacOS/Tailscale" not in rendered
+
+
+def test_setup_accepts_transient_health_failure_before_success(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        health_bodies=[
+            {"status": "starting", "scheme": "https"},
+            {"status": "ok", "scheme": "https"},
+        ]
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path, runner, clock=clock, sleeper=clock.sleep
+    )
+
+    provisioner.setup()
+
+    assert runner.health_calls == 2
+    assert clock.sleeps == [1.0]
+
+
+def test_pair_refuses_after_bounded_health_deadline(tmp_path: Path) -> None:
+    runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path, runner, clock=clock, sleeper=clock.sleep
+    )
+
+    with pytest.raises(ProvisioningError, match="HTTPS"):
+        provisioner.create_pairing_qr()
+
+    assert clock.now == 30.0
+    assert runner.health_calls == 31
+
+
 def test_public_token_only_reaches_keychain_not_assets_output_or_argv(
     tmp_path: Path,
     capsys,
@@ -373,6 +472,16 @@ def test_setup_from_bws_delegates_without_secret_in_command_or_environment(
     assert token not in (runner.calls[0][1] or {})
 
 
+def test_setup_from_bws_reports_missing_bws_without_traceback(tmp_path: Path) -> None:
+    runner = FakeRunner(bws_missing=True)
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="bws-project") as error:
+        provisioner.setup(from_bws=True)
+
+    assert "Traceback" not in str(error.value)
+
+
 def test_setup_from_bws_reports_unavailable_registration_without_secret(
     tmp_path: Path,
 ) -> None:
@@ -402,7 +511,10 @@ def test_bws_child_reads_token_from_environment_only(tmp_path: Path) -> None:
 
 def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
     runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
-    provisioner, _, _ = make_provisioner(tmp_path, runner)
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path, runner, clock=clock, sleeper=clock.sleep
+    )
 
     with pytest.raises(ProvisioningError, match="HTTPS"):
         provisioner.create_pairing_qr()

@@ -89,9 +89,13 @@ def render_renew_plist(layout: MacServerLayout, renew_script_path: Path) -> str:
     )
 
 
-def render_renew_script(layout: MacServerLayout) -> str:
+def render_renew_script(
+    layout: MacServerLayout, tailscale_path: Path | str | None = None
+) -> str:
     tailscale_cert_dir = layout.home / "Library/Containers/io.tailscale.ipn.macos/Data"
-    tailscale = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    tailscale = str(
+        tailscale_path or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    )
     domain = shlex.quote(layout.dns_name)
     tailscale = shlex.quote(tailscale)
     tailscale_cert_dir = shlex.quote(str(tailscale_cert_dir))
