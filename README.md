@@ -35,7 +35,8 @@ local coding harness running on the target Mac. The prompt runs the first-party
 provisioner and pauses before Tailscale certificate requests and LaunchAgent
 installation. It never asks you to paste a token into the chat.
 
-The provisioner supports these commands:
+The provisioner supports these commands. Run them from the repository root—the
+checkout directory containing `backend/`:
 
 ```bash
 uv run --project backend --extra provision python backend/scripts/provision_macos.py setup
@@ -121,7 +122,8 @@ You have three options, in order of preference:
 
 The guided `setup` command generates portable, user-specific LaunchAgents under
 the current user's Library directories and starts them only after confirmation.
-It also generates a renewal agent for the detected Tailscale certificate:
+It also generates a renewal agent for the detected Tailscale certificate. From
+the repository root—the checkout directory containing `backend/`—run:
 
 ```bash
 uv run --project backend --extra provision python backend/scripts/provision_macos.py setup
