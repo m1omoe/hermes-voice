@@ -12,6 +12,7 @@ from scripts.provision_macos import (
     CommandResult,
     MacProvisioner,
     ProvisioningError,
+    SecurityKeychain,
 )
 from scripts.provisioning import (
     MacServerLayout,
@@ -73,6 +74,7 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
 
     assert 'security find-generic-password -a "$USER" -s custom-service -w' in rendered
     assert 'HERMES_VOICE_TOKEN="$TOKEN"' in rendered
+    assert 'HERMES_VOICE_DISABLE_DOTENV="1"' in rendered
     assert "exec env" not in rendered
     assert f"UV={shlex.quote(str(layout.uv))}" in rendered
     assert f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app' in rendered
@@ -135,14 +137,15 @@ def test_renew_script_renews_and_restarts_generated_backend(tmp_path: Path) -> N
 
     rendered = render_renew_script(layout)
 
-    assert "tailscale" in rendered
-    assert 'cert "$DNS_NAME"' in rendered
+    assert "TAILSCALE" in rendered
+    assert (
+        'cert --cert-file "$DEST_DIR/server.crt" '
+        '--key-file "$DEST_DIR/server.key" "$DNS_NAME"'
+    ) in rendered
     assert f"DNS_NAME={shlex.quote(layout.dns_name)}" in rendered
-    tailscale_cert_dir = layout.home / "Library/Containers/io.tailscale.ipn.macos/Data"
-    assert shlex.quote(str(tailscale_cert_dir)) in rendered
+    assert "TAILSCALE_CERT_DIR" not in rendered
+    assert "Library/Containers/io.tailscale.ipn.macos" not in rendered
     assert f"DEST_DIR={shlex.quote(str(layout.support_dir))}" in rendered
-    assert 'cp "$TAILSCALE_CERT_DIR/$DNS_NAME.crt" "$DEST_DIR/server.crt"' in rendered
-    assert 'cp "$TAILSCALE_CERT_DIR/$DNS_NAME.key" "$DEST_DIR/server.key"' in rendered
     assert 'chmod 644 "$DEST_DIR/server.crt"' in rendered
     assert 'chmod 600 "$DEST_DIR/server.key"' in rendered
     assert 'launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"' in rendered
@@ -269,6 +272,9 @@ class FakeWriter:
         self.text[path] = content
         if mode is not None:
             self.modes.append((path, mode))
+
+    def mkdir(self, path: Path) -> None:
+        pass
 
     def copy(self, source: Path, destination: Path) -> None:
         self.copies.append((source, destination))
@@ -402,6 +408,75 @@ def test_setup_passes_discovered_tailscale_to_renewal_asset(tmp_path: Path) -> N
     rendered = writer.text[make_layout(tmp_path).support_dir / "renew-cert"]
     assert "TAILSCALE=/opt/custom/bin/tailscale" in rendered
     assert "/Applications/Tailscale.app/Contents/MacOS/Tailscale" not in rendered
+
+
+def test_setup_requests_certificate_directly_into_generated_support_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    provisioner.setup()
+
+    cert_calls = [call for call in runner.calls if "cert" in call[0]]
+    assert len(cert_calls) == 1
+    assert cert_calls[0][0] == [
+        "/opt/custom/bin/tailscale",
+        "cert",
+        "--cert-file",
+        str(make_layout(tmp_path).support_dir / "server.crt"),
+        "--key-file",
+        str(make_layout(tmp_path).support_dir / "server.key"),
+        "mandalore.tailnet.ts.net",
+    ]
+    assert all("Library/Containers/io.tailscale.ipn.macos" not in arg for arg in cert_calls[0][0])
+
+
+def test_security_keychain_uses_native_boundary_not_security_stdin(
+    monkeypatch,
+) -> None:
+    token = "token-never-in-subprocess-argv"
+    native_calls: list[tuple[bytes, bytes, bytes]] = []
+    subprocess_argv: list[list[str]] = []
+
+    class FakeNativeAPI:
+        def set_generic_password(
+            self, service: bytes, account: bytes, password: bytes
+        ) -> None:
+            native_calls.append((service, account, password))
+
+    def record_subprocess(args, **kwargs):
+        subprocess_argv.append(args)
+        raise AssertionError("Keychain storage must not invoke security via subprocess")
+
+    monkeypatch.setattr(subprocess, "run", record_subprocess)
+
+    SecurityKeychain(api=FakeNativeAPI(), user="alice").set("service", token)
+
+    assert native_calls == [(b"service", b"alice", token.encode())]
+    assert all(token not in arg for argv in subprocess_argv for arg in argv)
+
+
+def test_provisioned_backend_explicitly_skips_dotenv_loading(monkeypatch) -> None:
+    import app.config as config
+
+    monkeypatch.setenv("HERMES_VOICE_DISABLE_DOTENV", "1")
+    loader_calls: list[tuple[object, ...]] = []
+
+    class ForbiddenPath:
+        def exists(self) -> bool:
+            raise AssertionError("provisioned process must not inspect backend/.env")
+
+    monkeypatch.setattr(config, "_ENV_PATH", ForbiddenPath())
+    monkeypatch.setattr(
+        config,
+        "load_dotenv",
+        lambda *args, **kwargs: loader_calls.append(args),
+    )
+
+    config._load_dotenv_if_enabled()
+
+    assert loader_calls == []
 
 
 def test_setup_accepts_transient_health_failure_before_success(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ HERMES_VOICE_HOST="0.0.0.0" \\
 HERMES_VOICE_CERT={cert_path} \\
 HERMES_VOICE_KEY={key_path} \\
 HERMES_VOICE_PUBLIC_HOST={public_host} \\
+HERMES_VOICE_DISABLE_DOTENV="1" \\
 HERMES_VOICE_TOKEN="$TOKEN" \\
 exec "$UV" run --directory {backend_dir} python -m app
 """
@@ -65,6 +66,7 @@ def render_backend_plist(layout: MacServerLayout, wrapper_path: Path) -> str:
                 "HERMES_VOICE_CERT": str(cert_path),
                 "HERMES_VOICE_KEY": str(key_path),
                 "HERMES_VOICE_PUBLIC_HOST": layout.dns_name,
+                "HERMES_VOICE_DISABLE_DOTENV": "1",
             },
             "WorkingDirectory": str(backend_dir),
             "RunAtLoad": True,
@@ -92,13 +94,11 @@ def render_renew_plist(layout: MacServerLayout, renew_script_path: Path) -> str:
 def render_renew_script(
     layout: MacServerLayout, tailscale_path: Path | str | None = None
 ) -> str:
-    tailscale_cert_dir = layout.home / "Library/Containers/io.tailscale.ipn.macos/Data"
     tailscale = str(
         tailscale_path or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
     )
     domain = shlex.quote(layout.dns_name)
     tailscale = shlex.quote(tailscale)
-    tailscale_cert_dir = shlex.quote(str(tailscale_cert_dir))
     support_dir = shlex.quote(str(layout.support_dir))
     backend_label = shlex.quote(layout.backend_label)
     return f"""#!/usr/bin/env bash
@@ -106,14 +106,11 @@ set -euo pipefail
 
 DNS_NAME={domain}
 TAILSCALE={tailscale}
-TAILSCALE_CERT_DIR={tailscale_cert_dir}
 DEST_DIR={support_dir}
 BACKEND_LABEL={backend_label}
 
-"$TAILSCALE" cert "$DNS_NAME"
 mkdir -p "$DEST_DIR"
-cp "$TAILSCALE_CERT_DIR/$DNS_NAME.crt" "$DEST_DIR/server.crt"
-cp "$TAILSCALE_CERT_DIR/$DNS_NAME.key" "$DEST_DIR/server.key"
+"$TAILSCALE" cert --cert-file "$DEST_DIR/server.crt" --key-file "$DEST_DIR/server.key" "$DNS_NAME"
 chmod 644 "$DEST_DIR/server.crt"
 chmod 600 "$DEST_DIR/server.key"
 launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"

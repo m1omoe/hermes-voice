@@ -11,12 +11,20 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Auto-load backend/.env once at import. Lets `uv run python -m app` pick up
-# keys without the user having to `source .env` manually.
+# Auto-load backend/.env once at import for manual development. The guided
+# macOS service sets this guard before importing the backend.
 # override=False so explicit shell env still wins.
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(_ENV_PATH, override=False)
+
+
+def _load_dotenv_if_enabled() -> None:
+    if os.environ.get("HERMES_VOICE_DISABLE_DOTENV") == "1":
+        return
+    if _ENV_PATH.exists():
+        load_dotenv(_ENV_PATH, override=False)
+
+
+_load_dotenv_if_enabled()
 
 
 def _env(*names: str, default: str = "") -> str:

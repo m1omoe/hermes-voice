@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import getpass
 import json
 import os
 import platform
@@ -33,7 +35,6 @@ DEFAULT_PORT = 8765
 HEALTH_TIMEOUT = 30.0
 HEALTH_INTERVAL = 1.0
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
-CERT_CONTAINER = Path("Library/Containers/io.tailscale.ipn.macos/Data")
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class CommandRunner(Protocol):
 
 class FileWriter(Protocol):
     def write_text(self, path: Path, content: str, *, mode: int | None = None) -> None: ...
+
+    def mkdir(self, path: Path) -> None: ...
 
     def copy(self, source: Path, destination: Path) -> None: ...
 
@@ -105,6 +108,9 @@ class LocalFileWriter:
         if mode is not None:
             self.chmod(path, mode)
 
+    def mkdir(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+
     def copy(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -113,18 +119,127 @@ class LocalFileWriter:
         path.chmod(mode)
 
 
+class NativeKeychainAPI(Protocol):
+    def set_generic_password(self, service: bytes, account: bytes, password: bytes) -> None: ...
+
+
+class _SecurityFrameworkKeychain:
+    _DUPLICATE_ITEM = -25299
+
+    def __init__(self) -> None:
+        if sys.platform != "darwin":
+            raise ProvisioningError("native macOS Keychain is unavailable on this platform")
+        try:
+            security = ctypes.CDLL(
+                "/System/Library/Frameworks/Security.framework/Security"
+            )
+            core_foundation = ctypes.CDLL(
+                "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+            )
+        except OSError as exc:
+            raise ProvisioningError("native macOS Keychain is unavailable") from exc
+        pointer = ctypes.c_void_p
+        uint32 = ctypes.c_uint32
+        char_pointer = ctypes.c_char_p
+        item_pointer = ctypes.POINTER(pointer)
+        self._add = security.SecKeychainAddGenericPassword
+        self._add.argtypes = [
+            pointer,
+            uint32,
+            char_pointer,
+            uint32,
+            char_pointer,
+            uint32,
+            pointer,
+            item_pointer,
+        ]
+        self._add.restype = ctypes.c_int32
+        self._find = security.SecKeychainFindGenericPassword
+        self._find.argtypes = [
+            pointer,
+            uint32,
+            char_pointer,
+            uint32,
+            char_pointer,
+            ctypes.POINTER(uint32),
+            ctypes.POINTER(pointer),
+            item_pointer,
+        ]
+        self._find.restype = ctypes.c_int32
+        self._modify = security.SecKeychainItemModifyAttributesAndData
+        self._modify.argtypes = [pointer, pointer, uint32, pointer]
+        self._modify.restype = ctypes.c_int32
+        self._free_content = security.SecKeychainItemFreeContent
+        self._free_content.argtypes = [pointer, pointer]
+        self._free_content.restype = ctypes.c_int32
+        self._release = core_foundation.CFRelease
+        self._release.argtypes = [pointer]
+        self._release.restype = None
+
+    def set_generic_password(self, service: bytes, account: bytes, password: bytes) -> None:
+        service_buffer = ctypes.create_string_buffer(service)
+        account_buffer = ctypes.create_string_buffer(account)
+        password_buffer = ctypes.create_string_buffer(password)
+        status = self._add(
+            None,
+            len(service),
+            service_buffer,
+            len(account),
+            account_buffer,
+            len(password),
+            password_buffer,
+            None,
+        )
+        if status == self._DUPLICATE_ITEM:
+            self._update(service, account, password)
+        elif status:
+            raise OSError(status, "SecKeychainAddGenericPassword failed")
+
+    def _update(self, service: bytes, account: bytes, password: bytes) -> None:
+        pointer = ctypes.c_void_p
+        service_buffer = ctypes.create_string_buffer(service)
+        account_buffer = ctypes.create_string_buffer(account)
+        password_buffer = ctypes.create_string_buffer(password)
+        password_length = ctypes.c_uint32()
+        password_data = pointer()
+        item = pointer()
+        status = self._find(
+            None,
+            len(service),
+            service_buffer,
+            len(account),
+            account_buffer,
+            ctypes.byref(password_length),
+            ctypes.byref(password_data),
+            ctypes.byref(item),
+        )
+        if password_data:
+            self._free_content(None, password_data)
+        if status:
+            raise OSError(status, "SecKeychainFindGenericPassword failed")
+        try:
+            status = self._modify(item, None, len(password), password_buffer)
+        finally:
+            self._release(item)
+        if status:
+            raise OSError(status, "SecKeychainItemModifyAttributesAndData failed")
+
+
 class SecurityKeychain:
-    def __init__(self, runner: CommandRunner, user: str | None = None) -> None:
-        self._runner = runner
-        self._user = user or os.environ.get("USER", "")
+    def __init__(
+        self, api: NativeKeychainAPI | None = None, user: str | None = None
+    ) -> None:
+        self._api = api
+        self._account = (user or os.environ.get("USER") or getpass.getuser()).encode()
 
     def set(self, service: str, token: str) -> None:
-        result = self._runner.run(
-            ["security", "add-generic-password", "-a", self._user, "-s", service, "-U"],
-            input=token,
-        )
-        if result.returncode:
-            raise ProvisioningError("macOS Keychain refused the server token")
+        try:
+            api = self._api or _SecurityFrameworkKeychain()
+            api.set_generic_password(
+                service.encode(), self._account, token.encode()
+            )
+        except OSError as exc:
+            raise ProvisioningError("macOS Keychain refused the server token") from exc
 
 
 class MacProvisioner:
@@ -148,7 +263,7 @@ class MacProvisioner:
     ) -> None:
         self.layout = layout
         self.runner = runner or SubprocessRunner()
-        self.keychain = keychain or SecurityKeychain(self.runner)
+        self.keychain = keychain or SecurityKeychain()
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
         self.writer = writer or LocalFileWriter()
@@ -209,10 +324,22 @@ class MacProvisioner:
         self.output(f"Request a Tailscale HTTPS certificate for {layout.dns_name}.")
         if not self.confirm("request the Tailscale HTTPS certificate"):
             raise ProvisioningError("certificate request cancelled")
-        certificate = self.runner.run([str(tailscale), "cert", layout.dns_name])
+        self.writer.mkdir(layout.support_dir)
+        certificate = self.runner.run(
+            [
+                str(tailscale),
+                "cert",
+                "--cert-file",
+                str(layout.support_dir / "server.crt"),
+                "--key-file",
+                str(layout.support_dir / "server.key"),
+                layout.dns_name,
+            ]
+        )
         if certificate.returncode:
             raise ProvisioningError("Tailscale certificate creation failed; setup stopped")
-        self._copy_certificates(layout)
+        self.writer.chmod(layout.support_dir / "server.crt", 0o644)
+        self.writer.chmod(layout.support_dir / "server.key", 0o600)
 
         token = self.env.get("HERMES_VOICE_TOKEN") if from_bws_child else self.token_factory()
         if not token:
@@ -305,13 +432,6 @@ class MacProvisioner:
         self.writer.chmod(renew, 0o755)
         self.writer.write_text(backend_plist, render_backend_plist(layout, wrapper))
         self.writer.write_text(renew_plist, render_renew_plist(layout, renew))
-
-    def _copy_certificates(self, layout: MacServerLayout) -> None:
-        source_dir = layout.home / CERT_CONTAINER
-        self.writer.copy(source_dir / f"{layout.dns_name}.crt", layout.support_dir / "server.crt")
-        self.writer.copy(source_dir / f"{layout.dns_name}.key", layout.support_dir / "server.key")
-        self.writer.chmod(layout.support_dir / "server.crt", 0o644)
-        self.writer.chmod(layout.support_dir / "server.key", 0o600)
 
     def _start_agents(self, layout: MacServerLayout) -> None:
         uid = f"gui/{self.user_id}"
