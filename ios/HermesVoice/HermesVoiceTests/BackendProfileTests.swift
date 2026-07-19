@@ -11,6 +11,47 @@ final class BackendProfileTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
     }
 
+    func testProfileFromPairedServerUsesFirstAvailableHarness() {
+        let paired = PairedServer(
+            url: "https://studio.example:8765",
+            token: "claimed-token",
+            harnesses: [
+                HermesVoiceAPI.HarnessOption(harnessId: "offline", name: "Offline", available: false),
+                HermesVoiceAPI.HarnessOption(harnessId: "codex", name: "Codex", available: true),
+                HermesVoiceAPI.HarnessOption(harnessId: "claude", name: "Claude", available: true)
+            ]
+        )
+
+        let profile = profile(from: paired)
+
+        XCTAssertEqual(profile.name, "studio.example")
+        XCTAssertEqual(profile.url, paired.url)
+        XCTAssertEqual(profile.authToken, paired.token)
+        XCTAssertEqual(profile.selectedHarness, "codex")
+    }
+
+    func testApplyingPairedProfileCompletesOnboardingOnlyAfterPairingResult() {
+        let settings = AppSettings(defaults: defaults)
+        let paired = PairedServer(
+            url: "https://studio.example:8765",
+            token: "claimed-token",
+            harnesses: [HermesVoiceAPI.HarnessOption(harnessId: "hermes", name: "Hermes", available: true)]
+        )
+
+        XCTAssertFalse(settings.hasCompletedOnboarding)
+        XCTAssertNil(settings.lastReachable)
+        XCTAssertEqual(settings.backendProfiles.count, 1)
+        XCTAssertNotEqual(settings.activeBackendProfile.url, paired.url)
+
+        applyPairedProfile(paired, to: settings)
+
+        XCTAssertTrue(settings.hasCompletedOnboarding)
+        XCTAssertNotNil(settings.lastReachable)
+        XCTAssertEqual(settings.activeBackendProfile.url, paired.url)
+        XCTAssertEqual(settings.activeBackendProfile.authToken, paired.token)
+        XCTAssertEqual(settings.activeBackendProfile.selectedHarness, "hermes")
+    }
+
     func testMigratesLegacyBackendIntoActiveProfile() {
         defaults.set("https://studio.tailnet.ts.net:8765", forKey: "hv.backendURL")
         defaults.set("token-a", forKey: "hv.authToken")

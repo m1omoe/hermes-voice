@@ -104,6 +104,8 @@ struct BackendProfileManagerView: View {
 
     @State private var editingProfile: BackendProfile?
     @State private var showingAdd = false
+    @State private var showingAddOptions = false
+    @State private var showingPairing = false
     @State private var pinging = false
     @State private var healthResult = ""
 
@@ -160,7 +162,7 @@ struct BackendProfileManagerView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    showingAdd = true
+                    showingAddOptions = true
                 } label: {
                     Image(systemName: "plus")
                         .foregroundStyle(HVColor.amber)
@@ -168,11 +170,28 @@ struct BackendProfileManagerView: View {
                 .accessibilityLabel("Add server")
             }
         }
+        .confirmationDialog("Add server", isPresented: $showingAddOptions, titleVisibility: .visible) {
+            Button("Enter manually") {
+                showingAdd = true
+            }
+            Button("Set up a Mac server") {
+                showingPairing = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Choose how to add a saved server.")
+        }
         .sheet(isPresented: $showingAdd) {
             BackendProfileEditorView(existingProfile: nil)
                 .environmentObject(settings)
                 .environmentObject(conversation)
                 .environmentObject(conversationMode)
+        }
+        .sheet(isPresented: $showingPairing) {
+            PairServerSheet { paired in
+                settings.saveProfile(profile(from: paired))
+                showingPairing = false
+            }
         }
         .sheet(item: $editingProfile) { profile in
             BackendProfileEditorView(existingProfile: profile)

@@ -1,5 +1,31 @@
 import SwiftUI
 
+func profile(from paired: PairedServer) -> BackendProfile {
+    guard let harness = paired.harnesses.first(where: \.available) else {
+        preconditionFailure("Pairing must provide an available harness")
+    }
+    return BackendProfile(
+        name: BackendProfile.suggestedName(for: paired.url),
+        url: paired.url,
+        authToken: paired.token,
+        selectedHarness: harness.harnessId
+    )
+}
+
+func applyPairedProfile(_ paired: PairedServer, to settings: AppSettings) {
+    let mapped = profile(from: paired)
+    let active = settings.activeBackendProfile
+    settings.saveProfile(BackendProfile(
+        id: active.id,
+        name: mapped.name,
+        url: mapped.url,
+        authToken: mapped.authToken,
+        selectedHarness: mapped.selectedHarness
+    ))
+    settings.markReachable()
+    settings.hasCompletedOnboarding = true
+}
+
 /// First-launch full-screen onboarding, shown until a backend is configured and
 /// a connection test passes (gated by `AppSettings.hasCompletedOnboarding`).
 /// Two paths: tap a Bonjour-discovered backend on the LAN, or type a Tailscale
@@ -14,6 +40,7 @@ struct OnboardingView: View {
     @State private var testing = false
     @State private var status = ""
     @State private var failed = false
+    @State private var showingPairing = false
 
     private var canTest: Bool {
         !url.trimmingCharacters(in: .whitespaces).isEmpty && !testing
@@ -25,6 +52,7 @@ struct OnboardingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     header
+                    pairingButton
                     discoveredSection
                     manualSection
                     testButton
@@ -39,6 +67,11 @@ struct OnboardingView: View {
         .tint(HVColor.amber)
         .onAppear { browser.start() }
         .onDisappear { browser.stop() }
+        .sheet(isPresented: $showingPairing) {
+            PairServerSheet { paired in
+                applyPairedProfile(paired, to: settings)
+            }
+        }
         .onChange(of: browser.resolvedURL) { _, newURL in
             // A discovered backend resolved → prefill the field; user confirms
             // (and adds a token if needed) before we test.
@@ -72,6 +105,25 @@ struct OnboardingView: View {
                 .foregroundStyle(HVColor.creamDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var pairingButton: some View {
+        Button {
+            showingPairing = true
+        } label: {
+            Label("Set up a Mac server", systemImage: "qrcode.viewfinder")
+                .font(HVFont.body.weight(.semibold))
+                .foregroundStyle(HVColor.amber)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(HVColor.amber, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Set up a Mac server")
+        .accessibilityHint("Scan a pairing code from your Mac")
     }
 
     private var discoveredSection: some View {
