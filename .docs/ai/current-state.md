@@ -9,7 +9,7 @@
 - [x] Guided provisioner + terminal QR — `310b4a3..b65c31d`; task review clean after security hardening. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (38 focused; 276 backend total; ruff clean).
 - [x] iOS pairing payload + claim client — `1006cbe`, `9c086d6`; task review clean. Verify: focused `ServerPairingTests` 15/15; full iOS target 116/116 via the same scheme/destination.
 - [x] iOS QR scanner/setup sheet — `3bd5a43`, `6d6df69`, `153d9ed`; task review clean. Verify: focused `ServerPairingTests` 22/22; no-signing iPhone 17 build. On-device camera permission/scan remains for physical acceptance.
-- [ ] Wire onboarding + server manager. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
+- [ ] Wire onboarding + server manager. Verify: `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test` <!-- blocked 2026-07-19: fresh Xcode verification repeatedly times out in shared DerivedData SDK-cache/Swift-lib phases after cache reset; `b59c13f` task review clean, worker reports focused 40 + full 125 green. -->
 - [ ] Docs + full automated regression. Verify: `uv run --directory backend pytest` and `xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -destination 'platform=iOS Simulator,name=iPhone 17' test`
 - [ ] Mandalore physical setup/pair/replay acceptance. Verify: named human check
 
