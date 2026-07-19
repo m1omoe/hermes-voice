@@ -24,6 +24,9 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/Users/tfinklea/.local/bin/bws-project</string>
+        <string>run</string>
+        <string>--</string>
         <string>/opt/homebrew/bin/uv</string>
         <string>run</string>
         <string>--directory</string>
@@ -36,11 +39,9 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>HERMES_VOICE_HOST</key>
-        <string>0.0.0.0</string>
-        <key>HERMES_VOICE_CERT</key>
-        <string>/Users/tfinklea/.config/tailscale-certs/scadrial.crt</string>
-        <key>HERMES_VOICE_KEY</key>
-        <string>/Users/tfinklea/.config/tailscale-certs/scadrial.key</string>
+        <string>127.0.0.1</string>
+        <key>HERMES_USE_ACP</key>
+        <string>0</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/tfinklea/.local/bin</string>
     </dict>

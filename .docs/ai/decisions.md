@@ -208,3 +208,12 @@
 
 **Rationale**: A local harness already has the user's terminal context and can request macOS/Tailscale approvals naturally; the app needs no remote-control trust channel. The provisioner removes machine-specific deployment drift, while a one-time TLS claim delivers the QR UX without treating the barcode as a permanent password. Keychain storage avoids introducing a tracked or plaintext dotenv flow; BWS remains an optional shortcut, not a public-user prerequisite. Full design: `docs/superpowers/specs/2026-07-16-self-serve-server-setup-design.md`.
 
+## [2026-07-19] Mandalore backend uses Tailscale Serve and managed launchd secrets
+
+**Context**: The existing launchd template was never installed on Mandalore and still referenced a retired host's on-disk Tailscale certificate. The App Store Tailscale client could not write `tailscale cert` output to a user-selected path, while the backend must not depend on plaintext dotenv secrets for its service environment.
+
+**Decision**: Launch the backend through `bws-project run`, bind it only to `127.0.0.1:8765`, and use persistent `tailscale serve --bg --https=8765 http://127.0.0.1:8765` for tailnet HTTPS. Set `HERMES_USE_ACP=0` in this launch configuration until the local Hermes agent has its ACP extras installed.
+
+**Alternatives considered**: (a) Direct Uvicorn TLS using `tailscale cert` files — blocked by the App Store client's filesystem sandbox and would require renewal management. (b) Bind the backend directly to the tailnet interface without TLS — weakens the app's HTTPS setup and exposes the port unnecessarily. (c) Repair the Hermes ACP environment first — worthwhile follow-up, but not required to restore the documented subprocess fallback safely.
+
+**Rationale**: Serve owns certificate provisioning and renewal, keeps TLS termination in Tailscale, and forwards only to a loopback listener. `bws-project run` keeps the runtime token out of the plist and source tree. The ACP fallback restores availability immediately while preserving a clear, reversible path back to the warm server.
