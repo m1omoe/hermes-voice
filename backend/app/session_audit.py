@@ -48,7 +48,7 @@ async def _export_messages(settings: Settings, session_id: str) -> list[dict]:
         stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         if proc.returncode != 0:
             return []
-    except (FileNotFoundError, asyncio.TimeoutError):
+    except (FileNotFoundError, TimeoutError):
         return []
 
     raw = stdout_b.decode("utf-8", errors="replace").strip()
@@ -93,10 +93,30 @@ def _latest_assistant_text(messages: list[dict], since_ts: float) -> str:
         if float(msg.get("timestamp") or 0) < since_ts:
             continue
         if msg.get("role") == "assistant":
-            content = msg.get("content")
-            if isinstance(content, str) and content.strip():
+            content = _content_text(msg.get("content"))
+            if content.strip():
                 text = content.strip()
     return text
+
+
+def _content_text(content: object) -> str:
+    """Extract spoken text without serializing tool or thinking blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [_content_text(part) for part in content]
+        return "\n".join(part for part in parts if part)
+    if not isinstance(content, dict):
+        return ""
+
+    block_type = str(content.get("type") or "").lower()
+    if block_type.startswith(("tool", "thinking", "reason")):
+        return ""
+    for key in ("text", "content"):
+        value = content.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _summarize(messages: list[dict], since_ts: float) -> list[ToolCallSummary]:
