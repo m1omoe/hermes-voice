@@ -217,3 +217,11 @@
 **Alternatives considered**: (a) Direct Uvicorn TLS using `tailscale cert` files — blocked by the App Store client's filesystem sandbox and would require renewal management. (b) Bind the backend directly to the tailnet interface without TLS — weakens the app's HTTPS setup and exposes the port unnecessarily. (c) Repair the Hermes ACP environment first — worthwhile follow-up, but not required to restore the documented subprocess fallback safely.
 
 **Rationale**: Serve owns certificate provisioning and renewal, keeps TLS termination in Tailscale, and forwards only to a loopback listener. `bws-project run` keeps the runtime token out of the plist and source tree. The ACP fallback restores availability immediately while preserving a clear, reversible path back to the warm server.
+
+## [2026-07-19] Restore the warm ACP path after installing Hermes Agent extras
+
+**Context**: Mandalore's Homebrew Hermes Agent package lacked `agent-client-protocol`, causing `hermes acp` to exit at startup. The launch agent temporarily used the retained subprocess fallback to restore service.
+
+**Decision**: Install `agent-client-protocol==0.9.0` into the current Hermes Agent Homebrew environment (the version pinned by this backend), then remove the `HERMES_USE_ACP=0` launch override and return to the default warm ACP server.
+
+**Rationale**: `hermes acp --check` and a live backend restart both passed, including the ACP client connection. The local install is a practical recovery step but Homebrew upgrades may replace its `libexec` environment; package-level ACP dependency coverage remains a follow-up for the Hermes Agent distribution.

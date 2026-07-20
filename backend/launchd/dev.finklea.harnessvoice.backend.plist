@@ -40,8 +40,6 @@
     <dict>
         <key>HERMES_VOICE_HOST</key>
         <string>127.0.0.1</string>
-        <key>HERMES_USE_ACP</key>
-        <string>0</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/tfinklea/.local/bin</string>
     </dict>
