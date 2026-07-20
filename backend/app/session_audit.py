@@ -109,8 +109,7 @@ def _content_text(content: object) -> str:
     if not isinstance(content, dict):
         return ""
 
-    block_type = str(content.get("type") or "").lower()
-    if block_type not in ("", "text"):
+    if "type" in content and content["type"] != "text":
         return ""
     for key in ("text", "content"):
         value = content.get(key)

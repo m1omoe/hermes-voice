@@ -61,6 +61,23 @@ def test_latest_assistant_text_rejects_typed_non_text_blocks_with_visible_fields
         assert session_audit._latest_assistant_text(messages, since_ts=10) == ""
 
 
+@pytest.mark.parametrize(
+    ("declared_type", "visible_key"),
+    ((None, "text"), (False, "content"), (0, "text"), ("", "content"), ("TEXT", "text")),
+)
+def test_latest_assistant_text_rejects_noncanonical_declared_text_types(
+    declared_type, visible_key
+):
+    block = {"type": declared_type, visible_key: "must not be spoken"}
+
+    assert session_audit._latest_assistant_text(
+        [{"role": "assistant", "timestamp": 10, "content": block}], since_ts=10
+    ) == ""
+    assert session_audit._latest_assistant_text(
+        [{"role": "assistant", "timestamp": 10, "content": [block]}], since_ts=10
+    ) == ""
+
+
 @pytest.mark.asyncio
 async def test_fetch_turn_result_extracts_structured_text_and_preserves_tool_summaries(monkeypatch):
     messages = [
