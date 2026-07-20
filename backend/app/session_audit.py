@@ -110,7 +110,7 @@ def _content_text(content: object) -> str:
         return ""
 
     block_type = str(content.get("type") or "").lower()
-    if block_type.startswith(("tool", "thinking", "reason")):
+    if block_type not in ("", "text"):
         return ""
     for key in ("text", "content"):
         value = content.get(key)
