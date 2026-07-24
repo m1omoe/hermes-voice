@@ -72,6 +72,7 @@ final class PairServerSheetModel {
         pairingTask?.cancel()
         pairingTask = nil
         isPairing = false
+        claimedCredential = nil
     }
 
     func cancelPairing() {
@@ -113,7 +114,10 @@ final class PairServerSheetModel {
         }
 
         do {
-            let attempt = try await coordinator.pairAttempt(payload)
+            let credential = try await coordinator.claim(payload)
+            guard isActive, !Task.isCancelled, !didPair else { return }
+            claimedCredential = credential
+            let attempt = try await coordinator.authenticate(credential)
             guard isActive, !Task.isCancelled, !didPair else { return }
             consume(attempt)
         } catch {

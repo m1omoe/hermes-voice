@@ -29,6 +29,7 @@ def make_layout(tmp_path: Path) -> MacServerLayout:
         repo_root=tmp_path / "checkout",
         home=tmp_path / "home",
         uv=Path("/opt/custom/bin/uv"),
+        hermes_bin=Path("/Users/tester/.local/bin/hermes"),
         dns_name="mandalore.tailnet.ts.net",
         support_dir=tmp_path / "Library/Application Support/Harness Voice",
     )
@@ -65,6 +66,7 @@ def test_backend_plist_escapes_dynamic_paths(tmp_path: Path) -> None:
         repo_root=tmp_path / "checkout & copy",
         home=tmp_path / "home",
         uv=Path("/opt/custom/bin/uv"),
+        hermes_bin=Path("/Users/tester/.local/bin/hermes"),
         dns_name="mandalore.tailnet.ts.net",
         support_dir=tmp_path / "Library/Application Support/Harness & Voice",
     )
@@ -167,6 +169,7 @@ def test_renew_script_quotes_custom_backend_label_without_literal_quotes(tmp_pat
         repo_root=tmp_path / "checkout",
         home=tmp_path / "home",
         uv=Path("/opt/custom/bin/uv"),
+        hermes_bin=Path("/Users/tester/.local/bin/hermes"),
         dns_name="mandalore.tailnet.ts.net",
         support_dir=tmp_path / "Library/Application Support/Harness Voice",
         backend_label="custom.backend label",
@@ -197,30 +200,49 @@ class FakeRunner:
         *,
         uv: bool = True,
         tailscale: bool = True,
+        hermes_name: str = "hermes",
+        hermes_path: str | None = "/Users/tester/.local/bin/hermes",
         dns_name: str = "mandalore.tailnet.ts.net.",
         cert_ok: bool = True,
         bws_ok: bool = True,
         bws_missing: bool = False,
         health_body: dict | None = None,
         health_bodies: list[dict] | None = None,
+        harnesses_body: list[dict] | None = None,
     ) -> None:
         self.uv = uv
         self.tailscale = tailscale
+        self.hermes_name = hermes_name
+        self.hermes_path = hermes_path
         self.dns_name = dns_name
         self.cert_ok = cert_ok
         self.bws_ok = bws_ok
         self.bws_missing = bws_missing
-        self.health_body = health_body or {"status": "ok", "scheme": "https"}
+        self.health_body = health_body or {
+            "status": "ok",
+            "scheme": "https",
+            "mock": False,
+        }
         self.health_bodies = health_bodies
+        self.harnesses_body = (
+            harnesses_body
+            if harnesses_body is not None
+            else [{"id": "hermes", "name": "Hermes", "available": True}]
+        )
         self.health_calls = 0
+        self.harnesses_calls = 0
+        self.harnesses_tokens: list[str] = []
+        self.which_calls: list[str] = []
         self.calls: list[tuple[list[str], dict[str, str] | None, str | None]] = []
         self.capture_output: list[bool] = []
-
     def which(self, name: str) -> str | None:
+        self.which_calls.append(name)
         if name == "uv" and self.uv:
             return "/opt/custom/bin/uv"
         if name == "tailscale" and self.tailscale:
             return "/opt/custom/bin/tailscale"
+        if name == self.hermes_name:
+            return self.hermes_path
         return None
 
     def run(
@@ -252,6 +274,11 @@ class FakeRunner:
         if self.health_bodies:
             return self.health_bodies.pop(0)
         return self.health_body
+
+    def harnesses(self, url: str, token: str) -> list[dict]:
+        self.harnesses_calls += 1
+        self.harnesses_tokens.append(token)
+        return self.harnesses_body
 
 
 class FakeClock:
@@ -353,6 +380,39 @@ def test_setup_stops_when_uv_is_missing(tmp_path: Path) -> None:
         provisioner.setup()
 
 
+def test_setup_resolves_requested_hermes_to_absolute_runtime_path(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        hermes_name="custom-hermes",
+        hermes_path="/Users/tester/.local/bin/custom-hermes",
+    )
+    provisioner, _, writer = make_provisioner(
+        tmp_path,
+        runner,
+        env={"HERMES_BIN": "custom-hermes"},
+    )
+
+    provisioner.setup()
+
+    wrapper = writer.text[make_layout(tmp_path).support_dir / "run-backend"]
+    assert "custom-hermes" in runner.which_calls
+    assert "HERMES_BIN=/Users/tester/.local/bin/custom-hermes" in wrapper
+    assert runner.harnesses_tokens == ["public-token"]
+
+
+def test_setup_stops_before_install_when_hermes_cannot_be_resolved(tmp_path: Path) -> None:
+    runner = FakeRunner(hermes_path=None)
+    provisioner, _, writer = make_provisioner(tmp_path, runner)
+    output: list[str] = []
+    provisioner.output = output.append
+
+    with pytest.raises(ProvisioningError, match="Hermes"):
+        provisioner.setup()
+
+    assert not writer.text
+    assert runner.health_calls == 0
+    assert not any("ready" in message.lower() for message in output)
+
+
 def test_discover_uses_tailscale_app_bundle_when_path_lookup_is_absent(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -389,6 +449,7 @@ def test_setup_stops_when_magic_dns_is_missing(tmp_path: Path) -> None:
         repo_root=make_layout(tmp_path).repo_root,
         home=make_layout(tmp_path).home,
         uv=make_layout(tmp_path).uv,
+        hermes_bin=make_layout(tmp_path).hermes_bin,
         dns_name="",
         support_dir=make_layout(tmp_path).support_dir,
     )
@@ -528,8 +589,8 @@ def test_provisioned_backend_explicitly_skips_dotenv_loading(monkeypatch) -> Non
 def test_setup_accepts_transient_health_failure_before_success(tmp_path: Path) -> None:
     runner = FakeRunner(
         health_bodies=[
-            {"status": "starting", "scheme": "https"},
-            {"status": "ok", "scheme": "https"},
+            {"status": "starting", "scheme": "https", "mock": False},
+            {"status": "ok", "scheme": "https", "mock": False},
         ]
     )
     clock = FakeClock()
@@ -541,6 +602,44 @@ def test_setup_accepts_transient_health_failure_before_success(tmp_path: Path) -
 
     assert runner.health_calls == 2
     assert clock.sleeps == [1.0]
+
+
+def test_setup_rejects_mock_backend_before_reporting_ready(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        health_body={"status": "ok", "scheme": "https", "mock": True}
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path, runner, clock=clock, sleeper=clock.sleep
+    )
+    output: list[str] = []
+    provisioner.output = output.append
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.setup()
+
+    assert not any("ready" in message.lower() for message in output)
+
+
+def test_setup_requires_available_authenticated_hermes_before_ready(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(
+        harnesses_body=[{"id": "hermes", "name": "Hermes", "available": False}]
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path, runner, clock=clock, sleeper=clock.sleep
+    )
+    output: list[str] = []
+    provisioner.output = output.append
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.setup()
+
+    assert runner.harnesses_calls == 31
+    assert runner.harnesses_tokens == ["public-token"] * 31
+    assert not any("ready" in message.lower() for message in output)
 
 
 def test_pair_refuses_after_bounded_health_deadline(tmp_path: Path) -> None:

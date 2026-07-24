@@ -12,6 +12,7 @@ class MacServerLayout:
     repo_root: Path
     home: Path
     uv: Path
+    hermes_bin: Path
     dns_name: str
     support_dir: Path
     backend_label: str = "io.harnessvoice.backend"
@@ -35,6 +36,7 @@ def render_backend_wrapper(
     security_service = shlex.quote(keychain_service)
     security_account = shlex.quote(keychain_account or str(os.getuid()))
     uv_path = shlex.quote(str(layout.uv))
+    hermes_bin = shlex.quote(str(layout.hermes_bin))
     backend_dir = shlex.quote(str(layout.repo_root / "backend"))
     cert_path = shlex.quote(str(cert_path))
     key_path = shlex.quote(str(key_path))
@@ -51,6 +53,7 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 UV={uv_path}
+HERMES_BIN={hermes_bin} \\
 HERMES_VOICE_HOST="0.0.0.0" \\
 HERMES_VOICE_CERT={cert_path} \\
 HERMES_VOICE_KEY={key_path} \\

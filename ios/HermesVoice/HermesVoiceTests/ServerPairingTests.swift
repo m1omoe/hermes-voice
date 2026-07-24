@@ -205,6 +205,34 @@ final class ServerPairingTests: XCTestCase {
     }
 
     @MainActor
+    func testPairingModelRetriesValidationFailureWithoutReclaiming() async {
+        let fake = SequencedPairingClient(
+            listResults: [[availableHermes]],
+            failuresBeforeResults: 1
+        )
+        var pairedCount = 0
+        let model = PairServerSheetModel(client: fake) { _ in pairedCount += 1 }
+
+        await model.handleCode(validQR)
+
+        XCTAssertEqual(model.failure, .expiredOrUnavailable)
+        XCTAssertTrue(model.hasClaimedCredential)
+
+        await model.retryClaimedHarnesses()
+
+        let claimCount = await fake.claimCount()
+        let listCount = await fake.listCount()
+        let listTokens = await fake.listTokens()
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(listCount, 2)
+        XCTAssertEqual(listTokens, ["server-token", "server-token"])
+        XCTAssertEqual(pairedCount, 1)
+        XCTAssertTrue(model.didPair)
+        XCTAssertFalse(model.hasClaimedCredential)
+    }
+
+
+    @MainActor
     func testPairingTaskCancellationIgnoresLateClaimCompletion() async {
         let fake = SuspendedPairingClient(listResult: [availableHermes])
         var pairedCount = 0
@@ -404,12 +432,17 @@ final class ServerPairingTests: XCTestCase {
 
 private actor SequencedPairingClient: ServerPairingClient {
     private var results: [[HermesVoiceAPI.HarnessOption]]
+    private var failuresBeforeResults: Int
     private var claims = 0
     private var lists = 0
     private var tokens: [String] = []
 
-    init(listResults: [[HermesVoiceAPI.HarnessOption]]) {
+    init(
+        listResults: [[HermesVoiceAPI.HarnessOption]],
+        failuresBeforeResults: Int = 0
+    ) {
         self.results = listResults
+        self.failuresBeforeResults = failuresBeforeResults
     }
 
     func claim(_ payload: ServerPairingPayload) async throws -> String {
@@ -420,12 +453,20 @@ private actor SequencedPairingClient: ServerPairingClient {
     func listHarnesses(baseURL: String, token: String) async throws -> [HermesVoiceAPI.HarnessOption] {
         lists += 1
         tokens.append(token)
-        return results.isEmpty ? [] : results.removeFirst()
+        if failuresBeforeResults > 0 {
+            failuresBeforeResults -= 1
+            throw SequencedPairingError.validationFailed
+        }
+        return results.removeFirst()
     }
 
     func claimCount() -> Int { claims }
     func listCount() -> Int { lists }
     func listTokens() -> [String] { tokens }
+}
+
+private enum SequencedPairingError: Error {
+    case validationFailed
 }
 
 private actor ClaimGate {

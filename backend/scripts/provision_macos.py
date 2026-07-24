@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -104,6 +104,24 @@ class SubprocessRunner:
                 return json.load(response)
         except Exception as exc:
             raise ProvisioningError("HTTPS health check could not reach the backend") from exc
+
+    def harnesses(self, url: str, token: str) -> list[dict[str, object]]:
+        request = urllib.request.Request(
+            url,
+            headers={"X-Hermes-Voice-Token": token},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+        except Exception as exc:
+            raise ProvisioningError(
+                "authenticated harness readiness check could not reach the backend"
+            ) from exc
+        if not isinstance(payload, list):
+            raise ProvisioningError(
+                "authenticated harness readiness check returned an invalid response"
+            )
+        return payload
 
 
 class LocalFileWriter:
@@ -332,6 +350,7 @@ class MacProvisioner:
         home: Path | None = None,
         repo_root: Path | None = None,
         platform_name: str | None = None,
+        hermes_bin: str = "hermes",
     ) -> MacServerLayout:
         runner = runner or SubprocessRunner()
         system = platform_name or platform.system()
@@ -339,6 +358,13 @@ class MacProvisioner:
         uv = cls._which(runner, "uv")
         if uv is None:
             raise ProvisioningError("uv is required; install uv and try again")
+        resolved_hermes = cls._which(runner, hermes_bin)
+        if resolved_hermes is None:
+            raise ProvisioningError(
+                "Hermes harness is required; install Hermes or set HERMES_BIN "
+                "to an executable and try again"
+            )
+        resolved_hermes_path = Path(resolved_hermes).expanduser().resolve()
         tailscale = cls._which(runner, "tailscale")
         if tailscale is None and TAILSCALE_APP_PATH.is_file():
             tailscale = str(TAILSCALE_APP_PATH)
@@ -353,6 +379,7 @@ class MacProvisioner:
             repo_root=repo_root,
             home=home,
             uv=Path(uv),
+            hermes_bin=resolved_hermes_path,
             dns_name=dns_name,
             support_dir=home / "Library/Application Support/Harness Voice",
         )
@@ -413,7 +440,7 @@ class MacProvisioner:
             self.keychain.set(KEYCHAIN_SERVICE, token)
         self._write_assets(layout, tailscale)
         self._start_agents(layout)
-        self._require_https_health(layout)
+        self._require_https_health(layout, token)
         self.output(f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}")
 
     def create_pairing_qr(self) -> str:
@@ -442,8 +469,13 @@ class MacProvisioner:
         return payload
 
     def _prepare_layout(self) -> tuple[MacServerLayout, Path]:
+        requested_hermes = self.env.get("HERMES_BIN") or "hermes"
         if self.layout is None:
-            layout = self.discover(runner=self.runner, platform_name=self.platform_name)
+            layout = self.discover(
+                runner=self.runner,
+                platform_name=self.platform_name,
+                hermes_bin=requested_hermes,
+            )
             tailscale = self._find_tailscale()
             return layout, tailscale
 
@@ -452,35 +484,31 @@ class MacProvisioner:
             uv = self._which(self.runner, "uv")
             if uv is None:
                 raise ProvisioningError("uv is required; install uv and try again")
+            hermes = self._which(self.runner, requested_hermes)
+            if hermes is None:
+                raise ProvisioningError(
+                    "Hermes harness is required; install Hermes or set HERMES_BIN "
+                    "to an executable and try again"
+                )
+            hermes_bin = Path(hermes).expanduser().resolve()
         else:
             uv = str(layout.uv)
+            hermes_bin = layout.hermes_bin
         tailscale = self._find_tailscale()
         dns_name = self._normalize_dns(layout.dns_name)
         if not dns_name:
             dns_name = self._detect_dns(self.runner, tailscale)
         if not dns_name:
             raise ProvisioningError("Tailscale MagicDNS is unavailable")
-        if Path(uv) != layout.uv:
-            layout = MacServerLayout(
-                repo_root=layout.repo_root,
-                home=layout.home,
+        return (
+            replace(
+                layout,
                 uv=Path(uv),
+                hermes_bin=hermes_bin,
                 dns_name=dns_name,
-                support_dir=layout.support_dir,
-                backend_label=layout.backend_label,
-                renew_label=layout.renew_label,
-            )
-        elif dns_name != layout.dns_name:
-            layout = MacServerLayout(
-                repo_root=layout.repo_root,
-                home=layout.home,
-                uv=layout.uv,
-                dns_name=dns_name,
-                support_dir=layout.support_dir,
-                backend_label=layout.backend_label,
-                renew_label=layout.renew_label,
-            )
-        return layout, tailscale
+            ),
+            tailscale,
+        )
 
     def _write_assets(self, layout: MacServerLayout, tailscale: Path) -> None:
         wrapper = layout.support_dir / "run-backend"
@@ -520,19 +548,36 @@ class MacProvisioner:
             "backend LaunchAgent start",
         )
 
-    def _require_https_health(self, layout: MacServerLayout) -> None:
+    def _require_https_health(
+        self,
+        layout: MacServerLayout,
+        token: str | None = None,
+    ) -> None:
         url = self._health_url(layout)
         deadline = self.clock() + HEALTH_TIMEOUT
         last_error: ProvisioningError | None = None
         while True:
             try:
                 health = self._health(url)
+                if health.get("status") != "ok" or health.get("scheme") != "https":
+                    raise ProvisioningError("HTTPS health check is not ready")
+                if token is not None:
+                    if health.get("mock") is not False:
+                        raise ProvisioningError(
+                            "backend readiness requires an available real Hermes harness"
+                        )
+                    harnesses = self._harnesses(self._harnesses_url(layout), token)
+                    if not any(
+                        harness.get("id") == "hermes"
+                        and harness.get("available") is True
+                        for harness in harnesses
+                    ):
+                        raise ProvisioningError(
+                            "backend readiness requires an available real Hermes harness"
+                        )
+                return
             except ProvisioningError as exc:
                 last_error = exc
-            else:
-                if health.get("status") == "ok" and health.get("scheme") == "https":
-                    return
-                last_error = ProvisioningError("HTTPS health check is not ready")
 
             remaining = deadline - self.clock()
             if remaining <= 0:
@@ -549,6 +594,28 @@ class MacProvisioner:
             raise
         except Exception as exc:
             raise ProvisioningError("HTTPS health check could not reach the backend") from exc
+
+    def _harnesses(self, url: str, token: str) -> list[dict[str, object]]:
+        harnesses = getattr(self.runner, "harnesses", None)
+        if harnesses is None:
+            raise ProvisioningError(
+                "authenticated harness readiness check is unavailable"
+            )
+        try:
+            payload = harnesses(url, token)
+        except ProvisioningError:
+            raise
+        except Exception as exc:
+            raise ProvisioningError(
+                "authenticated harness readiness check could not reach the backend"
+            ) from exc
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise ProvisioningError(
+                "authenticated harness readiness check returned an invalid response"
+            )
+        return payload
 
     def _capture_bws_token(self) -> str | None:
         token = self.env.pop("HERMES_VOICE_TOKEN", None)
@@ -620,6 +687,9 @@ class MacProvisioner:
 
     def _health_url(self, layout: MacServerLayout) -> str:
         return f"https://{layout.dns_name}:{DEFAULT_PORT}/health"
+
+    def _harnesses_url(self, layout: MacServerLayout) -> str:
+        return f"https://{layout.dns_name}:{DEFAULT_PORT}/api/harnesses"
 
     @staticmethod
     def _pairing_payload(layout: MacServerLayout, pairing_id: str, secret: str) -> str:
