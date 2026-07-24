@@ -23,11 +23,11 @@
 
 ## Pending physical acceptance
 
-- On Mandalore, run guided `setup`, then `pair`.
-- Scan from an iPhone; confirm profile creation and a real Hermes turn.
-- Confirm pairing replay and expiry fail.
-- Confirm backend restarts after login/restart.
-- Confirm manual URL/token and Bonjour fallbacks remain usable.
+- Attempted `setup --from-bws` on Mandalore on 2026-07-23.
+- Blocked after approval: the App Store Tailscale client cannot write certificate/key output outside its sandbox (`operation not permitted`), including `/tmp`.
+- Existing Mandalore deployment remains on Tailscale Serve; direct-cert provisioning was not installed.
+- Choose or implement a Serve-compatible pairing readiness path before retrying physical acceptance.
+- Then scan from iPhone, confirm profile + real Hermes turn, reject replay/expiry, verify login restart, and exercise manual/Bonjour fallbacks.
 - Do not call optional BWS integration accepted until the live generated wrapper runs without a secret dotenv.
 
 ## Known repository-wide verification issue
