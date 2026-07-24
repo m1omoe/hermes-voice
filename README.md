@@ -52,6 +52,28 @@ child process through its environment only. `pair` shows a five-minute,
 one-time QR code after HTTPS is healthy. Scan it from the app; the long-lived
 server token is never encoded in the QR code.
 
+#### Troubleshooting guided setup
+
+Guided setup supports macOS with Tailscale only. Run it from a local coding
+harness on the target Mac and approve the certificate request and LaunchAgent
+installation when prompted. If setup stops after a prerequisite changes, rerun
+`setup`; to replace an expired or used code, rerun `pair`. If camera access is
+unavailable, keep using the app's manual URL/token or Bonjour paths.
+
+Non-secret diagnostics:
+
+```bash
+launchctl print "gui/$(id -u)/io.harnessvoice.backend"
+tail -F "$HOME/Library/Logs/Harness Voice/backend.log"
+curl -s "https://$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(\".\")'):8765/health" | jq
+```
+
+The health endpoint should report `status: ok` and `scheme: https`. Never print
+the Keychain token or paste credentials into a harness prompt, diagnostic
+command, issue, or chat. The copied app prompt contains only the public
+repository and provisioner command.
+
+
 ### Advanced local development
 
 For local-only development without a public Tailscale server:

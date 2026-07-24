@@ -21,6 +21,22 @@ stores the token in Keychain, creates HTTPS LaunchAgents after confirmation, and
 renders a short-lived pairing QR only after `/health` reports HTTPS readiness.
 The checked-in `launchd/` files are non-operational deprecation stubs.
 
+Setup is macOS + Tailscale only. A local harness may pause for certificate and
+LaunchAgent approval; rerun `setup` after resolving a prerequisite, or `pair`
+to issue another five-minute code. Manual URL/token and Bonjour remain
+available when camera pairing cannot be used.
+
+Inspect the service without exposing credentials:
+
+```bash
+launchctl print "gui/$(id -u)/io.harnessvoice.backend"
+tail -F "$HOME/Library/Logs/Harness Voice/backend.log"
+curl -s "https://$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(\".\")'):8765/health" | jq
+```
+
+Do not retrieve or print the Keychain token for diagnostics.
+
+
 ## Advanced local development
 
 ```bash
