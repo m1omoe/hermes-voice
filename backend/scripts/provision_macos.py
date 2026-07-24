@@ -444,7 +444,11 @@ class MacProvisioner:
         self.output(f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}")
 
     def create_pairing_qr(self) -> str:
-        layout = self.layout or self.discover(runner=self.runner, platform_name=self.platform_name)
+        layout = self.layout or self.discover(
+            runner=self.runner,
+            platform_name=self.platform_name,
+            hermes_bin=self.env.get("HERMES_BIN") or "hermes",
+        )
         self.layout = layout
         self._require_https_health(layout)
         store = self.pairing_store or self._default_pairing_store()

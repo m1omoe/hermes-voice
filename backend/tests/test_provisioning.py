@@ -846,6 +846,48 @@ def test_bws_child_sanitizes_token_from_later_subprocess_environments(
     assert all(env.get("HERMES_VOICE_TOKEN") != token for env in runner.subprocess_envs)
 
 
+def test_fresh_pair_process_reuses_custom_hermes_bin_from_setup_environment(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("qrcode")
+    hermes_bin = "/Users/tester/.local/bin/custom-hermes"
+    env = {"HERMES_BIN": "custom-hermes"}
+    setup_runner = FakeRunner(
+        hermes_name="custom-hermes",
+        hermes_path=hermes_bin,
+    )
+    setup, _, _ = make_provisioner(tmp_path, setup_runner, env=env)
+    setup.setup()
+
+    class FakePairingStore:
+        def create(self, *, ttl_seconds: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                pairing_id="pairing-id",
+                secret="pairing-secret",
+                expires_at=1_800_000_000.0,
+            )
+
+    pair_runner = FakeRunner(
+        hermes_name="custom-hermes",
+        hermes_path=hermes_bin,
+    )
+    pair = MacProvisioner(
+        runner=pair_runner,
+        keychain=FakeKeychain("public-token"),
+        platform_name="Darwin",
+        env=env,
+        pairing_store=FakePairingStore(),
+        output=lambda _: None,
+    )
+
+    payload = pair.create_pairing_qr()
+
+    assert payload.startswith("harness-voice://pair?")
+    assert pair.layout is not None
+    assert pair.layout.hermes_bin == Path(hermes_bin)
+    assert "custom-hermes" in pair_runner.which_calls
+
+
 def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
     runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
     clock = FakeClock()
