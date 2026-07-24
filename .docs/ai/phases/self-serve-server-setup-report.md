@@ -14,12 +14,12 @@
 
 ## Verification
 
-- `uv run --extra dev pytest` from `backend/`: 287 passed.
+- `uv run --extra dev pytest` from `backend/`: 292 passed.
 - Self-serve backend files: ruff clean.
 - `xcodegen generate --spec ios/HermesVoice/project.yml --project ios/HermesVoice`: succeeded.
 - Focused profile + pairing tests: 40 passed.
-- Full iOS suite on iPhone 17 simulator: 125 passed.
-- Task reviews clean for Tasks 1–7 after recorded fix rounds.
+- Full iOS suite on iPhone 17 simulator: 126 passed.
+- Task reviews clean for Tasks 1–7; final adversarial review clean after fixes for real-harness launchd readiness and consumed-ticket retry.
 
 ## Pending physical acceptance
 

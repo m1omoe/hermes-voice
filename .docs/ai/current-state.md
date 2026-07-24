@@ -9,8 +9,8 @@
 - [x] Guided provisioner + terminal QR — `310b4a3..b65c31d`; task review clean after security hardening. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (38 focused; 276 backend total; ruff clean).
 - [x] iOS pairing payload + claim client — `1006cbe`, `9c086d6`; task review clean. Verify: focused `ServerPairingTests` 15/15; full iOS target 116/116 via the same scheme/destination.
 - [x] iOS QR scanner/setup sheet — `3bd5a43`, `6d6df69`, `153d9ed`; task review clean. Verify: focused `ServerPairingTests` 22/22; no-signing iPhone 17 build. On-device camera permission/scan remains for physical acceptance.
-- [x] Onboarding + server manager — `b59c13f`; task review clean. Verify: focused profile/pairing suites 40/40; full iOS suite 125/125 on iPhone 17 simulator (2026-07-23).
-- [x] Docs + automated regression — backend 287 passed; self-serve backend files ruff-clean; full iOS suite 125 passed. Full backend-wide ruff remains pre-existing-red outside this feature.
+- [x] Onboarding + server manager — `b59c13f`; task review clean. Verify: focused profile/pairing suites 40/40; full iOS suite 126/126 on iPhone 17 simulator (2026-07-23).
+- [x] Docs + automated regression — backend 292 passed; self-serve backend files ruff-clean; full iOS suite 126 passed; final adversarial review clean after two fix rounds. Full backend-wide ruff remains pre-existing-red outside this feature.
 - [?] Mandalore physical setup/pair/replay acceptance (USER): run `setup` + `pair`, scan from iPhone, real turn, replay/expiry rejection, login restart, manual/Bonjour fallbacks.
 
 ## Server profiles — MERGED to main (2026-07-16); on-device acceptance pending
