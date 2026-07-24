@@ -218,3 +218,20 @@
 
 **Rationale**: The provisioner is a public setup path and must not bake the maintainer identity into operational assets. A stable product namespace is portable, predictable for diagnostics, and does not need per-user label migration. Existing installed legacy agents are outside this feature and remain a manual migration concern.
 
+## [2026-07-19] Mandalore backend uses Tailscale Serve and managed launchd secrets
+
+**Context**: The existing launchd template was never installed on Mandalore and still referenced a retired host's on-disk Tailscale certificate. The App Store Tailscale client could not write `tailscale cert` output to a user-selected path, while the backend must not depend on plaintext dotenv secrets for its service environment.
+
+**Decision**: Launch the backend through `bws-project run`, bind it only to `127.0.0.1:8765`, and use persistent `tailscale serve --bg --https=8765 http://127.0.0.1:8765` for tailnet HTTPS. Set `HERMES_USE_ACP=0` in this launch configuration until the local Hermes agent has its ACP extras installed.
+
+**Alternatives considered**: (a) Direct Uvicorn TLS using `tailscale cert` files — blocked by the App Store client's filesystem sandbox and would require renewal management. (b) Bind the backend directly to the tailnet interface without TLS — weakens the app's HTTPS setup and exposes the port unnecessarily. (c) Repair the Hermes ACP environment first — worthwhile follow-up, but not required to restore the documented subprocess fallback safely.
+
+**Rationale**: Serve owns certificate provisioning and renewal, keeps TLS termination in Tailscale, and forwards only to a loopback listener. `bws-project run` keeps the runtime token out of the plist and source tree. The ACP fallback restores availability immediately while preserving a clear, reversible path back to the warm server.
+
+## [2026-07-19] Restore the warm ACP path after installing Hermes Agent extras
+
+**Context**: Mandalore's Homebrew Hermes Agent package lacked `agent-client-protocol`, causing `hermes acp` to exit at startup. The launch agent temporarily used the retained subprocess fallback to restore service.
+
+**Decision**: Install `agent-client-protocol==0.9.0` into the current Hermes Agent Homebrew environment (the version pinned by this backend), then remove the `HERMES_USE_ACP=0` launch override and return to the default warm ACP server.
+
+**Rationale**: `hermes acp --check` and a live backend restart both passed, including the ACP client connection. The local install is a practical recovery step but Homebrew upgrades may replace its `libexec` environment; package-level ACP dependency coverage remains a follow-up for the Hermes Agent distribution.
