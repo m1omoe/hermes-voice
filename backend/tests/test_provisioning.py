@@ -214,19 +214,21 @@ def test_backend_plist_carries_serve_mode_environment_only(tmp_path: Path) -> No
     assert "HERMES_VOICE_TOKEN" not in env
 
 
-def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) -> None:
+def test_backend_wrapper_delegates_native_keychain_lookup_to_hidden_launcher(
+    tmp_path: Path,
+) -> None:
     layout = make_layout(tmp_path)
 
-    rendered = render_backend_wrapper(layout, "custom-service", "501")
+    rendered = render_backend_wrapper(layout)
+    provisioner = layout.repo_root / "backend/scripts/provision_macos.py"
 
-    assert "security find-generic-password -a 501" in rendered
-    assert "-s custom-service -w" in rendered
-    assert 'security find-generic-password -a "$USER"' not in rendered
-    assert 'HERMES_VOICE_TOKEN="$TOKEN"' in rendered
+    assert "security" not in rendered
+    assert "TOKEN" not in rendered
+    assert "_launch-backend" in rendered
+    assert shlex.quote(str(provisioner)) in rendered
     assert 'HERMES_VOICE_DISABLE_DOTENV="1"' in rendered
     assert "exec env" not in rendered
     assert f"UV={shlex.quote(str(layout.uv))}" in rendered
-    assert f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app' in rendered
     assert 'HERMES_VOICE_HOST="127.0.0.1"' in rendered
     assert 'HERMES_VOICE_TRUSTED_HTTPS_PROXY="tailscale-serve"' in rendered
     assert 'FORWARDED_ALLOW_IPS="127.0.0.1"' in rendered
@@ -236,10 +238,6 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
     assert "HERMES_VOICE_KEY" not in rendered
     assert "server.crt" not in rendered
     assert "server.key" not in rendered
-    assert 'echo "$TOKEN"' not in rendered
-    assert "export HERMES_VOICE_TOKEN=" not in rendered
-    assert "if [[ -z \"$TOKEN\" ]]" in rendered
-    assert "exit 1" in rendered
 
 
 def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
@@ -247,7 +245,7 @@ def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
 ) -> None:
     layout = make_layout(tmp_path)
 
-    rendered = render_backend_wrapper(layout, "custom-service")
+    rendered = render_backend_wrapper(layout)
     syntax = subprocess.run(
         ["bash", "-n"],
         input=rendered,
@@ -265,14 +263,16 @@ def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
     assert assignment_indices
     assert max(assignment_indices) < exec_index
     assert lines[exec_index] == (
-        f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app'
+        f'exec "$UV" run --directory {layout.repo_root / "backend"} '
+        f"python {shlex.quote(str(layout.repo_root / 'backend/scripts/provision_macos.py'))} "
+        "_launch-backend"
     )
 
 
 def test_backend_wrapper_quotes_dynamic_hermes_path(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
-    rendered = render_backend_wrapper(layout, "custom-service")
+    rendered = render_backend_wrapper(layout)
 
     assert f"HERMES_BIN={shlex.quote(str(layout.hermes_bin))}" in rendered
 
@@ -1298,6 +1298,83 @@ def test_security_keychain_delete_uses_native_boundary() -> None:
     SecurityKeychain(api=FakeNativeAPI(), account="501").delete("service")
 
     assert native_calls == [(b"service", b"501")]
+
+
+def test_hidden_backend_launcher_uses_native_keychain_and_final_child_env() -> None:
+    token = "launcher-token-never-in-argv"
+    native_calls: list[tuple[bytes, bytes]] = []
+    exec_calls: list[tuple[str, list[str], dict[str, str]]] = []
+    base_env = {"STABLE_SETTING": "present"}
+
+    class FakeNativeAPI:
+        def get_generic_password(
+            self, service: bytes, account: bytes
+        ) -> bytes | None:
+            native_calls.append((service, account))
+            return token.encode()
+
+    class ExecCaptured(Exception):
+        pass
+
+    def capture_exec(
+        executable: str, argv: list[str], env: dict[str, str]
+    ) -> None:
+        exec_calls.append((executable, argv, env))
+        raise ExecCaptured
+
+    keychain = SecurityKeychain(api=FakeNativeAPI(), account="501")
+
+    with pytest.raises(ExecCaptured):
+        provision_macos._launch_backend(
+            keychain=keychain,
+            env=base_env,
+            execve=capture_exec,
+        )
+
+    assert native_calls == [(b"HERMES_VOICE_TOKEN", b"501")]
+    assert len(exec_calls) == 1
+    executable, argv, child_env = exec_calls[0]
+    assert executable == provision_macos.sys.executable
+    assert argv == [provision_macos.sys.executable, "-m", "app"]
+    assert all(token not in arg for arg in argv)
+    assert child_env == {
+        "STABLE_SETTING": "present",
+        "HERMES_VOICE_TOKEN": token,
+    }
+    assert base_env == {"STABLE_SETTING": "present"}
+
+
+def test_hidden_backend_launcher_refuses_missing_keychain_token() -> None:
+    class FakeNativeAPI:
+        def get_generic_password(
+            self, service: bytes, account: bytes
+        ) -> bytes | None:
+            return None
+
+    def forbidden_exec(
+        executable: str, argv: list[str], env: dict[str, str]
+    ) -> None:
+        raise AssertionError("missing token must not launch the backend")
+
+    with pytest.raises(ProvisioningError, match="no backend token"):
+        provision_macos._launch_backend(
+            keychain=SecurityKeychain(api=FakeNativeAPI(), account="501"),
+            env={},
+            execve=forbidden_exec,
+        )
+
+
+def test_main_routes_only_exact_hidden_backend_launch_command(monkeypatch) -> None:
+    launches: list[bool] = []
+    monkeypatch.setattr(
+        provision_macos,
+        "_launch_backend",
+        lambda: launches.append(True),
+        raising=False,
+    )
+
+    assert provision_macos.main(["_launch-backend"]) == 0
+    assert launches == [True]
 
 
 def test_provisioned_backend_explicitly_skips_dotenv_loading(monkeypatch) -> None:

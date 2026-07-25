@@ -447,6 +447,24 @@ class SecurityKeychain:
             ) from exc
 
 
+def _launch_backend(
+    *,
+    keychain: Keychain | None = None,
+    env: Mapping[str, str] | None = None,
+    execve: Callable[[str, list[str], dict[str, str]], None] | None = None,
+) -> None:
+    native_keychain = keychain or SecurityKeychain(account=str(os.getuid()))
+    token = native_keychain.get(KEYCHAIN_SERVICE)
+    if not token:
+        raise ProvisioningError("Keychain lookup returned no backend token")
+    child_env = dict(os.environ if env is None else env)
+    child_env["HERMES_VOICE_TOKEN"] = token
+    executor = execve or os.execve
+    executable = sys.executable
+    executor(executable, [executable, "-m", "app"], child_env)
+    raise ProvisioningError("backend launcher returned unexpectedly")
+
+
 @dataclass(frozen=True)
 class _FileSnapshot:
     path: Path
@@ -627,9 +645,7 @@ class _DeploymentTransaction:
         return token
 
     def _stage_and_validate(self) -> None:
-        wrapper = render_backend_wrapper(
-            self.layout, KEYCHAIN_SERVICE, str(self.provisioner.user_id)
-        )
+        wrapper = render_backend_wrapper(self.layout)
         plist = render_backend_plist(self.layout, self.wrapper)
         self._register(
             "staged wrapper removal",
@@ -1225,13 +1241,22 @@ class MacProvisioner:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["_launch-backend"]:
+        try:
+            _launch_backend()
+        except ProvisioningError as exc:
+            print(f"Provisioning stopped: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     parser = argparse.ArgumentParser(description="Provision a Harness Voice macOS server")
     commands = parser.add_subparsers(dest="command", required=True)
     setup = commands.add_parser("setup")
     setup.add_argument("--from-bws", action="store_true")
     setup.add_argument("--from-bws-child", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("pair")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     provisioner = MacProvisioner()
     try:
         if args.command == "setup":
