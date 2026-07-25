@@ -141,7 +141,7 @@ Errors are non-secret and identify the failed boundary:
 - mock backend or authenticated harness failure;
 - rollback failure.
 
-No log, prompt, exception, QR output, subprocess argv, or report contains the backend token or pairing secret.
+The pairing secret exists only in memory and inside the rendered QR payload, where it is required for claiming. It is never printed separately or disclosed in plaintext logs, prompts, exceptions, reports, or subprocess argv. The long-lived backend token is never present in any QR or output.
 
 ## Verification
 
