@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import platform
+import plistlib
 import secrets
 import shutil
 import subprocess
@@ -32,6 +33,8 @@ DEFAULT_PORT = 8765
 HEALTH_TIMEOUT = 30.0
 HEALTH_INTERVAL = 1.0
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"
+RENEWAL_LABEL = "io.harnessvoice.cert-renew"
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,18 @@ class CommandRunner(Protocol):
 class FileWriter(Protocol):
     def write_text(self, path: Path, content: str, *, mode: int | None = None) -> None: ...
 
+    def write_bytes(
+        self, path: Path, content: bytes, *, mode: int | None = None
+    ) -> None: ...
+
+    def read_bytes(self, path: Path) -> bytes | None: ...
+
+    def exists(self, path: Path) -> bool: ...
+
+    def replace(self, source: Path, destination: Path) -> None: ...
+
+    def unlink(self, path: Path) -> None: ...
+
     def mkdir(self, path: Path) -> None: ...
 
     def copy(self, source: Path, destination: Path) -> None: ...
@@ -122,6 +137,8 @@ class Keychain(Protocol):
     def get(self, service: str) -> str | None: ...
 
     def set(self, service: str, token: str) -> None: ...
+
+    def delete(self, service: str) -> None: ...
 
 
 class ProvisioningError(RuntimeError):
@@ -185,6 +202,30 @@ class LocalFileWriter:
         if mode is not None:
             self.chmod(path, mode)
 
+    def write_bytes(
+        self, path: Path, content: bytes, *, mode: int | None = None
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        if mode is not None:
+            self.chmod(path, mode)
+
+    def read_bytes(self, path: Path) -> bytes | None:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def exists(self, path: Path) -> bool:
+        return path.exists()
+
+    def replace(self, source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(destination)
+
+    def unlink(self, path: Path) -> None:
+        path.unlink(missing_ok=True)
+
     def mkdir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -200,6 +241,8 @@ class NativeKeychainAPI(Protocol):
     def get_generic_password(self, service: bytes, account: bytes) -> bytes | None: ...
 
     def set_generic_password(self, service: bytes, account: bytes, password: bytes) -> None: ...
+
+    def delete_generic_password(self, service: bytes, account: bytes) -> None: ...
 
 
 class _SecurityFrameworkKeychain:
@@ -249,6 +292,9 @@ class _SecurityFrameworkKeychain:
         self._modify = security.SecKeychainItemModifyAttributesAndData
         self._modify.argtypes = [pointer, pointer, uint32, pointer]
         self._modify.restype = ctypes.c_int32
+        self._delete = security.SecKeychainItemDelete
+        self._delete.argtypes = [pointer]
+        self._delete.restype = ctypes.c_int32
         self._free_content = security.SecKeychainItemFreeContent
         self._free_content.argtypes = [pointer, pointer]
         self._free_content.restype = ctypes.c_int32
@@ -301,6 +347,36 @@ class _SecurityFrameworkKeychain:
             self._update(service, account, password)
         elif status:
             raise OSError(status, "SecKeychainAddGenericPassword failed")
+
+    def delete_generic_password(self, service: bytes, account: bytes) -> None:
+        pointer = ctypes.c_void_p
+        service_buffer = ctypes.create_string_buffer(service)
+        account_buffer = ctypes.create_string_buffer(account)
+        password_length = ctypes.c_uint32()
+        password_data = pointer()
+        item = pointer()
+        status = self._find(
+            None,
+            len(service),
+            service_buffer,
+            len(account),
+            account_buffer,
+            ctypes.byref(password_length),
+            ctypes.byref(password_data),
+            ctypes.byref(item),
+        )
+        if password_data:
+            self._free_content(None, password_data)
+        if status == self._ITEM_NOT_FOUND:
+            return
+        if status:
+            raise OSError(status, "SecKeychainFindGenericPassword failed")
+        try:
+            status = self._delete(item)
+        finally:
+            self._release(item)
+        if status:
+            raise OSError(status, "SecKeychainItemDelete failed")
 
     def _update(self, service: bytes, account: bytes, password: bytes) -> None:
         pointer = ctypes.c_void_p
@@ -360,6 +436,322 @@ class SecurityKeychain:
             )
         except OSError as exc:
             raise ProvisioningError("macOS Keychain refused the server token") from exc
+
+    def delete(self, service: str) -> None:
+        try:
+            api = self._api or _SecurityFrameworkKeychain()
+            api.delete_generic_password(service.encode(), self._account)
+        except OSError as exc:
+            raise ProvisioningError(
+                "macOS Keychain could not delete the server token"
+            ) from exc
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    path: Path
+    existed: bool
+    content: bytes | None
+
+
+@dataclass(frozen=True)
+class _DeploymentSnapshot:
+    files: tuple[_FileSnapshot, ...]
+    token: str | None
+    loaded_labels: frozenset[str]
+    serve_state: ServeMappingState
+
+    def file(self, path: Path) -> _FileSnapshot:
+        return next(snapshot for snapshot in self.files if snapshot.path == path)
+
+
+class _DeploymentTransaction:
+    def __init__(
+        self,
+        provisioner: MacProvisioner,
+        layout: MacServerLayout,
+        tailscale: Path,
+        *,
+        requested_token: str | None,
+        replace_token: bool,
+    ) -> None:
+        self.provisioner = provisioner
+        self.layout = layout
+        self.tailscale = tailscale
+        self.requested_token = requested_token
+        self.replace_token = replace_token
+        self.committed = False
+        self._rollback_actions: list[tuple[str, Callable[[], None]]] = []
+        nonce = f"{os.getpid()}-{secrets.token_hex(4)}"
+        self.wrapper = layout.support_dir / "run-backend"
+        launch_agents = layout.home / "Library/LaunchAgents"
+        self.backend_plist = launch_agents / f"{layout.backend_label}.plist"
+        self.renewal_plist = launch_agents / f"{RENEWAL_LABEL}.plist"
+        self.renewal_script = layout.support_dir / "renew-cert"
+        self.legacy_plist = launch_agents / f"{LEGACY_BACKEND_LABEL}.plist"
+        self.staged_wrapper = self._temporary_path(self.wrapper, "staged", nonce)
+        self.staged_plist = self._temporary_path(
+            self.backend_plist, "staged", nonce
+        )
+        self._secrets: list[str] = []
+
+    @staticmethod
+    def _temporary_path(path: Path, purpose: str, nonce: str) -> Path:
+        suffix = path.suffix
+        name = f".{path.name}.{purpose}-{nonce}{suffix}"
+        return path.with_name(name)
+
+    def execute(self) -> None:
+        snapshot = self._snapshot()
+        if snapshot.token:
+            self._secrets.append(snapshot.token)
+        token = self._select_token(snapshot.token)
+        self._secrets.append(token)
+        try:
+            self._stage_and_validate()
+            if self.replace_token or snapshot.token is None:
+                self._register(
+                    "Keychain restoration",
+                    lambda: self._restore_token(snapshot.token),
+                )
+                self._boundary(
+                    "Keychain update",
+                    lambda: self.provisioner.keychain.set(KEYCHAIN_SERVICE, token),
+                )
+
+            mapping_added = self.provisioner._require_serve_mapping(
+                self.layout, self.tailscale
+            )
+            if mapping_added:
+                self._register(
+                    "Serve mapping removal",
+                    lambda: self.provisioner._remove_serve_mapping(self.tailscale),
+                )
+
+            for label in (self.layout.backend_label, LEGACY_BACKEND_LABEL):
+                if label not in snapshot.loaded_labels:
+                    continue
+                plist = (
+                    self.backend_plist
+                    if label == self.layout.backend_label
+                    else self.legacy_plist
+                )
+                self._register(
+                    f"{label} restart",
+                    lambda label=label, plist=plist: self.provisioner._bootstrap_agent(
+                        label, plist
+                    ),
+                )
+                self.provisioner._bootout_agent(
+                    label, f"existing {label} LaunchAgent shutdown"
+                )
+
+            self._install_asset(snapshot.file(self.wrapper), self.staged_wrapper)
+            self._install_asset(
+                snapshot.file(self.backend_plist), self.staged_plist
+            )
+            self.provisioner._require_exact_serve_mapping(
+                self.layout, self.tailscale
+            )
+            self._register(
+                "new neutral LaunchAgent removal",
+                lambda: self.provisioner._bootout_agent_if_loaded(
+                    self.layout.backend_label
+                ),
+            )
+            self.provisioner._bootstrap_agent(
+                self.layout.backend_label, self.backend_plist
+            )
+            self.provisioner._require_https_health(self.layout, token)
+        except Exception as exc:
+            self._raise_precommit_failure(exc)
+
+        self.commit()
+        cleanup_failures = self._cleanup(snapshot)
+        if cleanup_failures:
+            boundaries = ", ".join(cleanup_failures)
+            raise ProvisioningError(
+                f"deployment committed; cleanup incomplete at {boundaries}"
+            )
+
+    def commit(self) -> None:
+        self.committed = True
+        self._rollback_actions.clear()
+
+    def _snapshot(self) -> _DeploymentSnapshot:
+        paths = (
+            self.wrapper,
+            self.backend_plist,
+            self.renewal_plist,
+            self.renewal_script,
+            self.legacy_plist,
+        )
+        files = tuple(self._snapshot_file(path) for path in paths)
+        loaded_labels = frozenset(
+            label
+            for label in (
+                self.layout.backend_label,
+                RENEWAL_LABEL,
+                LEGACY_BACKEND_LABEL,
+            )
+            if self.provisioner._agent_loaded(label)
+        )
+        serve_state = self.provisioner._serve_mapping_state(
+            self.layout, self.tailscale
+        )
+        if serve_state.conflict is not None:
+            raise ProvisioningError(
+                f"Tailscale Serve conflict: {serve_state.conflict}"
+            )
+        token = self.provisioner.keychain.get(KEYCHAIN_SERVICE)
+        return _DeploymentSnapshot(files, token, loaded_labels, serve_state)
+
+    def _snapshot_file(self, path: Path) -> _FileSnapshot:
+        existed = self.provisioner.writer.exists(path)
+        content = self.provisioner.writer.read_bytes(path) if existed else None
+        if existed and content is None:
+            raise ProvisioningError(f"generated asset snapshot failed for {path.name}")
+        return _FileSnapshot(path, existed, content)
+
+    def _select_token(self, prior_token: str | None) -> str:
+        token = (
+            self.requested_token
+            if self.replace_token
+            else prior_token
+            if prior_token is not None
+            else self.provisioner.token_factory()
+        )
+        if not token:
+            raise ProvisioningError("no server token was provided")
+        return token
+
+    def _stage_and_validate(self) -> None:
+        wrapper = render_backend_wrapper(
+            self.layout, KEYCHAIN_SERVICE, str(self.provisioner.user_id)
+        )
+        plist = render_backend_plist(self.layout, self.wrapper)
+        self._register(
+            "staged wrapper removal",
+            lambda: self.provisioner.writer.unlink(self.staged_wrapper),
+        )
+        self._boundary(
+            "staged wrapper write",
+            lambda: self.provisioner.writer.write_text(
+                self.staged_wrapper, wrapper, mode=0o755
+            ),
+        )
+        self._register(
+            "staged plist removal",
+            lambda: self.provisioner.writer.unlink(self.staged_plist),
+        )
+        self._boundary(
+            "staged plist write",
+            lambda: self.provisioner.writer.write_text(
+                self.staged_plist, plist, mode=0o644
+            ),
+        )
+        validation = self.provisioner.runner.run(
+            ["bash", "-n", str(self.staged_wrapper)]
+        )
+        if validation.returncode:
+            raise ProvisioningError("staged backend wrapper validation failed")
+        staged_plist = self.provisioner.writer.read_bytes(self.staged_plist)
+        if staged_plist is None:
+            raise ProvisioningError("staged backend plist validation failed")
+        try:
+            parsed = plistlib.loads(staged_plist)
+        except (TypeError, ValueError, plistlib.InvalidFileException) as exc:
+            raise ProvisioningError("staged backend plist validation failed") from exc
+        if not isinstance(parsed, dict):
+            raise ProvisioningError("staged backend plist validation failed")
+
+    def _install_asset(self, prior: _FileSnapshot, staged: Path) -> None:
+        self._register(
+            f"{prior.path.name} restoration",
+            lambda: self._restore_file(prior),
+        )
+        self._boundary(
+            f"{prior.path.name} atomic replacement",
+            lambda: self.provisioner.writer.replace(staged, prior.path),
+        )
+
+    def _restore_file(self, snapshot: _FileSnapshot) -> None:
+        if not snapshot.existed:
+            self.provisioner.writer.unlink(snapshot.path)
+            return
+        if snapshot.content is None:
+            raise ProvisioningError(
+                f"missing snapshot content for {snapshot.path.name}"
+            )
+        nonce = f"{os.getpid()}-{secrets.token_hex(4)}"
+        staged = self._temporary_path(snapshot.path, "rollback", nonce)
+        mode = 0o755 if snapshot.path == self.wrapper else 0o644
+        try:
+            self.provisioner.writer.write_bytes(
+                staged, snapshot.content, mode=mode
+            )
+            self.provisioner.writer.replace(staged, snapshot.path)
+        finally:
+            self.provisioner.writer.unlink(staged)
+
+    def _restore_token(self, prior_token: str | None) -> None:
+        if prior_token is None:
+            self.provisioner.keychain.delete(KEYCHAIN_SERVICE)
+        else:
+            self.provisioner.keychain.set(KEYCHAIN_SERVICE, prior_token)
+
+    def _cleanup(self, snapshot: _DeploymentSnapshot) -> list[str]:
+        failures: list[str] = []
+        if RENEWAL_LABEL in snapshot.loaded_labels:
+            try:
+                self.provisioner._bootout_agent(
+                    RENEWAL_LABEL, "obsolete renewal agent bootout"
+                )
+            except Exception:
+                failures.append("renewal agent bootout")
+        renewal_failed = False
+        for path in (self.renewal_plist, self.renewal_script):
+            try:
+                self.provisioner.writer.unlink(path)
+            except Exception:
+                renewal_failed = True
+        if renewal_failed:
+            failures.append("renewal asset removal")
+        try:
+            self.provisioner.writer.unlink(self.legacy_plist)
+        except Exception:
+            failures.append("legacy asset removal")
+        return failures
+
+    def _register(self, boundary: str, action: Callable[[], None]) -> None:
+        self._rollback_actions.append((boundary, action))
+
+    def _boundary(self, boundary: str, action: Callable[[], None]) -> None:
+        try:
+            action()
+        except Exception as exc:
+            raise ProvisioningError(f"{boundary} failed") from exc
+
+    def _raise_precommit_failure(self, original: Exception) -> None:
+        failures: list[str] = []
+        for boundary, action in reversed(self._rollback_actions):
+            try:
+                action()
+            except Exception:
+                failures.append(boundary)
+        message = (
+            "deployment failed before commit: "
+            + self._redact(str(original) or type(original).__name__)
+        )
+        if failures:
+            message += "; rollback failed at " + ", ".join(failures)
+        raise ProvisioningError(message) from original
+
+    def _redact(self, message: str) -> str:
+        for secret in self._secrets:
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        return message
 
 
 class MacProvisioner:
@@ -454,60 +846,25 @@ class MacProvisioner:
         layout, tailscale = self._prepare_layout()
         self.layout = layout
         self.tailscale = tailscale
-        serve_mapping_added = self._require_serve_mapping(layout, tailscale)
-        try:
-
-            self.output(f"Request a Tailscale HTTPS certificate for {layout.dns_name}.")
-            if not self.confirm("request the Tailscale HTTPS certificate"):
-                raise ProvisioningError("certificate request cancelled")
-            self.writer.mkdir(layout.support_dir)
-            certificate = self.runner.run(
-                [
-                    str(tailscale),
-                    "cert",
-                    "--cert-file",
-                    str(layout.support_dir / "server.crt"),
-                    "--key-file",
-                    str(layout.support_dir / "server.key"),
-                    layout.dns_name,
-                ]
-            )
-            if certificate.returncode:
-                raise ProvisioningError(
-                    "Tailscale certificate creation failed; setup stopped"
-                )
-            self.writer.chmod(layout.support_dir / "server.crt", 0o644)
-            self.writer.chmod(layout.support_dir / "server.key", 0o600)
-
-            existing_token = (
-                None if from_bws_child else self.keychain.get(KEYCHAIN_SERVICE)
-            )
-            token = (
-                bws_token
-                if from_bws_child
-                else self.token_factory()
-                if existing_token is None
-                else existing_token
-            )
-            if not token:
-                raise ProvisioningError("no server token was provided")
-            replace_token = from_bws_child or existing_token is None
-            self.output("Install and start the Harness Voice LaunchAgents.")
-            if not self.confirm("install and start the LaunchAgents"):
-                raise ProvisioningError("LaunchAgent installation cancelled")
-            self._unload_existing_agents(layout)
-            if replace_token:
-                self.keychain.set(KEYCHAIN_SERVICE, token)
-            self._write_assets(layout)
-            self._start_agents(layout)
-            self._require_https_health(layout, token)
-            self.output(
-                f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}"
-            )
-        except Exception:
-            if serve_mapping_added:
-                self._remove_serve_mapping(tailscale)
-            raise
+        self.output(
+            "Configure a persistent tailnet-only HTTPS proxy for "
+            f"{layout.dns_name} and install one backend LaunchAgent."
+        )
+        if not self.confirm(
+            "configure the tailnet-only HTTPS proxy and backend LaunchAgent"
+        ):
+            raise ProvisioningError("server setup cancelled")
+        transaction = _DeploymentTransaction(
+            self,
+            layout,
+            tailscale,
+            requested_token=bws_token,
+            replace_token=from_bws_child,
+        )
+        transaction.execute()
+        self.output(
+            f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}"
+        )
 
     def create_pairing_qr(self) -> str:
         layout = self.layout or self.discover(
@@ -580,35 +937,27 @@ class MacProvisioner:
             tailscale,
         )
 
-    def _write_assets(self, layout: MacServerLayout) -> None:
-        wrapper = layout.support_dir / "run-backend"
-        launch_agents = layout.home / "Library/LaunchAgents"
-        backend_plist = launch_agents / f"{layout.backend_label}.plist"
-        self.writer.write_text(
-            wrapper,
-            render_backend_wrapper(layout, KEYCHAIN_SERVICE, str(self.user_id)),
-        )
-        self.writer.chmod(wrapper, 0o755)
-        self.writer.write_text(backend_plist, render_backend_plist(layout, wrapper))
+    def _agent_loaded(self, label: str) -> bool:
+        service = f"gui/{self.user_id}/{label}"
+        return self.runner.run(["launchctl", "print", service]).returncode == 0
 
-    def _unload_existing_agents(self, layout: MacServerLayout) -> None:
-        uid = f"gui/{self.user_id}"
-        service = f"{uid}/{layout.backend_label}"
-        result = self.runner.run(["launchctl", "print", service])
-        if result.returncode == 0:
-            self._run_checked(
-                ["launchctl", "bootout", service],
-                "existing LaunchAgent shutdown",
-            )
+    def _bootout_agent(self, label: str, action: str) -> None:
+        service = f"gui/{self.user_id}/{label}"
+        self._run_checked(["launchctl", "bootout", service], action)
 
-    def _start_agents(self, layout: MacServerLayout) -> None:
+    def _bootout_agent_if_loaded(self, label: str) -> None:
+        if self._agent_loaded(label):
+            self._bootout_agent(label, f"{label} rollback shutdown")
+
+    def _bootstrap_agent(self, label: str, plist: Path) -> None:
         uid = f"gui/{self.user_id}"
-        launch_agents = layout.home / "Library/LaunchAgents"
-        plist = launch_agents / f"{layout.backend_label}.plist"
-        self._run_checked(["launchctl", "bootstrap", uid, str(plist)], "LaunchAgent bootstrap")
         self._run_checked(
-            ["launchctl", "kickstart", "-k", f"{uid}/{layout.backend_label}"],
-            "backend LaunchAgent start",
+            ["launchctl", "bootstrap", uid, str(plist)],
+            f"{label} LaunchAgent bootstrap",
+        )
+        self._run_checked(
+            ["launchctl", "kickstart", "-k", f"{uid}/{label}"],
+            f"{label} LaunchAgent start",
         )
 
     def _require_https_health(
@@ -717,29 +1066,44 @@ class MacProvisioner:
         if state.conflict is not None:
             raise ProvisioningError(f"Tailscale Serve conflict: {state.conflict}")
 
-        add = self.runner.run(
-            [
-                str(tailscale),
-                "serve",
-                "--bg",
-                f"--https={DEFAULT_PORT}",
-                f"http://127.0.0.1:{DEFAULT_PORT}",
-            ]
-        )
-        if add.returncode:
-            raise ProvisioningError("Tailscale Serve mapping creation failed")
-
         try:
+            add = self.runner.run(
+                [
+                    str(tailscale),
+                    "serve",
+                    "--bg",
+                    f"--https={DEFAULT_PORT}",
+                    f"http://127.0.0.1:{DEFAULT_PORT}",
+                ]
+            )
+            if add.returncode:
+                raise ProvisioningError("Tailscale Serve mapping creation failed")
             verified = self._serve_mapping_state(layout, tailscale)
             if not verified.exact:
                 detail = verified.conflict or "mapping remained absent"
                 raise ProvisioningError(
                     f"failed to verify exact Tailscale Serve mapping: {detail}"
                 )
-        except Exception:
-            self._remove_serve_mapping(tailscale)
+        except Exception as original:
+            try:
+                self._remove_serve_mapping(tailscale)
+            except Exception as rollback:
+                raise ProvisioningError(
+                    f"{original}; Tailscale Serve mapping rollback failed"
+                ) from rollback
             raise
         return True
+
+    def _require_exact_serve_mapping(
+        self, layout: MacServerLayout, tailscale: Path
+    ) -> None:
+        state = self._serve_mapping_state(layout, tailscale)
+        if not state.exact:
+            detail = state.conflict or "mapping is absent"
+            raise ProvisioningError(
+                "exact Tailscale Serve mapping changed before LaunchAgent "
+                f"bootstrap: {detail}"
+            )
 
     def _serve_mapping_state(
         self, layout: MacServerLayout, tailscale: Path
