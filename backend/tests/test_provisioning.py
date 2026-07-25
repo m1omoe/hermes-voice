@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts import provision_macos
 from scripts.provision_macos import (
     CommandResult,
     MacProvisioner,
@@ -20,6 +21,125 @@ from scripts.provisioning import (
     render_backend_plist,
     render_backend_wrapper,
 )
+
+EXACT_SERVE_STATUS = """\
+{
+  "TCP": {"8765": {"HTTPS": true}},
+  "Web": {
+    "mandalore.tailnet.ts.net:8765": {
+      "Handlers": {"/": {"Proxy": "http://127.0.0.1:8765"}}
+    }
+  }
+}
+"""
+ABSENT_SERVE_STATUS = '{"TCP": {}, "Web": {}}'
+WRONG_PROXY_SERVE_STATUS = """\
+{
+  "TCP": {"8765": {"HTTPS": true}},
+  "Web": {
+    "mandalore.tailnet.ts.net:8765": {
+      "Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}
+    }
+  }
+}
+"""
+
+
+def test_serve_status_parser_accepts_only_the_exact_mapping() -> None:
+    state = provision_macos.parse_serve_status(
+        EXACT_SERVE_STATUS, "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is True
+    assert state.absent is False
+    assert state.conflict is None
+
+
+def test_serve_status_parser_recognizes_fully_absent_mapping() -> None:
+    state = provision_macos.parse_serve_status(
+        ABSENT_SERVE_STATUS, "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is True
+    assert state.conflict is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (WRONG_PROXY_SERVE_STATUS, "proxy"),
+        (
+            """\
+{
+  "TCP": {"8765": {"HTTPS": false}},
+  "Web": {
+    "mandalore.tailnet.ts.net:8765": {
+      "Handlers": {"/": {"Proxy": "http://127.0.0.1:8765"}}
+    }
+  }
+}
+""",
+            "HTTPS",
+        ),
+        (
+            """\
+{
+  "TCP": {"8765": {"HTTPS": true}},
+  "Web": {
+    "mandalore.tailnet.ts.net:8765": {
+      "Handlers": {"/alternate": {"Proxy": "http://127.0.0.1:8765"}}
+    }
+  }
+}
+""",
+            "handler",
+        ),
+    ],
+)
+def test_serve_status_parser_reports_conflicting_mapping(
+    payload: str, reason: str
+) -> None:
+    state = provision_macos.parse_serve_status(
+        payload, "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is False
+    assert state.conflict is not None
+    assert reason.lower() in state.conflict.lower()
+
+
+def test_serve_status_parser_treats_malformed_json_as_conflict() -> None:
+    state = provision_macos.parse_serve_status(
+        "{not-json", "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is False
+    assert state.conflict is not None
+    assert "malformed" in state.conflict.lower()
+
+
+def test_serve_status_parser_ignores_a_different_host_and_port() -> None:
+    payload = """\
+{
+  "TCP": {"9443": {"HTTPS": true}},
+  "Web": {
+    "other.tailnet.ts.net:9443": {
+      "Handlers": {"/": {"Proxy": "http://127.0.0.1:9443"}}
+    }
+  }
+}
+"""
+
+    state = provision_macos.parse_serve_status(
+        payload, "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is True
+    assert state.conflict is None
 
 
 def make_layout(tmp_path: Path) -> MacServerLayout:
@@ -186,6 +306,7 @@ class FakeRunner:
         health_body: dict | None = None,
         health_bodies: list[dict] | None = None,
         harnesses_body: list[dict] | None = None,
+        serve_statuses: list[str] | None = None,
     ) -> None:
         self.uv = uv
         self.tailscale = tailscale
@@ -195,6 +316,11 @@ class FakeRunner:
         self.cert_ok = cert_ok
         self.bws_ok = bws_ok
         self.bws_missing = bws_missing
+        self.serve_statuses = (
+            list(serve_statuses)
+            if serve_statuses is not None
+            else [EXACT_SERVE_STATUS]
+        )
         self.health_body = health_body or {
             "status": "ok",
             "scheme": "https",
@@ -232,6 +358,10 @@ class FakeRunner:
     ) -> CommandResult:
         self.calls.append((args, env, input))
         self.capture_output.append(capture_output)
+        if args[1:] == ["serve", "status", "--json"]:
+            if not self.serve_statuses:
+                raise AssertionError("unexpected extra Tailscale Serve status check")
+            return CommandResult(0, self.serve_statuses.pop(0), "")
         if "cert" in args:
             return CommandResult(0 if self.cert_ok else 1, "", "certificate failed")
         if args[:2] == ["bws-project", "run"]:
@@ -333,6 +463,112 @@ def make_provisioner(
         provisioner_args["sleeper"] = sleeper
     provisioner = MacProvisioner(**provisioner_args)
     return provisioner, keychain, writer
+
+
+def test_exact_serve_mapping_is_observed_without_mutation(tmp_path: Path) -> None:
+    runner = FakeRunner(serve_statuses=[EXACT_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    added = provisioner._require_serve_mapping(
+        make_layout(tmp_path), Path("/opt/custom/bin/tailscale")
+    )
+
+    assert added is False
+    assert [call[0] for call in runner.calls] == [
+        ["/opt/custom/bin/tailscale", "serve", "status", "--json"]
+    ]
+
+
+def test_absent_serve_mapping_is_added_exactly_then_rechecked(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        serve_statuses=[ABSENT_SERVE_STATUS, EXACT_SERVE_STATUS]
+    )
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    added = provisioner._require_serve_mapping(
+        make_layout(tmp_path), Path("/opt/custom/bin/tailscale")
+    )
+
+    assert added is True
+    assert [call[0] for call in runner.calls] == [
+        ["/opt/custom/bin/tailscale", "serve", "status", "--json"],
+        [
+            "/opt/custom/bin/tailscale",
+            "serve",
+            "--bg",
+            "--https=8765",
+            "http://127.0.0.1:8765",
+        ],
+        ["/opt/custom/bin/tailscale", "serve", "status", "--json"],
+    ]
+
+
+def test_serve_conflict_stops_before_any_local_mutation(tmp_path: Path) -> None:
+    runner = FakeRunner(serve_statuses=[WRONG_PROXY_SERVE_STATUS])
+    provisioner, keychain, writer = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="conflict"):
+        provisioner.setup()
+
+    assert writer.text == {}
+    assert writer.modes == []
+    assert keychain.saved == []
+    assert not any("cert" in call[0] for call in runner.calls)
+    assert not any("launchctl" in call[0] for call in runner.calls)
+    assert all("reset" not in call[0] for call in runner.calls)
+
+
+def test_serve_mapping_unverified_add_is_removed_and_rejected(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        serve_statuses=[ABSENT_SERVE_STATUS, WRONG_PROXY_SERVE_STATUS]
+    )
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="verify"):
+        provisioner._require_serve_mapping(
+            make_layout(tmp_path), Path("/opt/custom/bin/tailscale")
+        )
+
+    assert [call[0] for call in runner.calls][-1] == [
+        "/opt/custom/bin/tailscale",
+        "serve",
+        "--https=8765",
+        "off",
+    ]
+    assert all("reset" not in call[0] for call in runner.calls)
+
+
+def test_setup_rolls_back_only_serve_mapping_added_by_this_run(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(
+        cert_ok=False,
+        serve_statuses=[ABSENT_SERVE_STATUS, EXACT_SERVE_STATUS],
+    )
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="certificate"):
+        provisioner.setup()
+
+    serve_calls = [call[0] for call in runner.calls if "serve" in call[0]]
+    assert serve_calls == [
+        ["/opt/custom/bin/tailscale", "serve", "status", "--json"],
+        [
+            "/opt/custom/bin/tailscale",
+            "serve",
+            "--bg",
+            "--https=8765",
+            "http://127.0.0.1:8765",
+        ],
+        ["/opt/custom/bin/tailscale", "serve", "status", "--json"],
+        [
+            "/opt/custom/bin/tailscale",
+            "serve",
+            "--https=8765",
+            "off",
+        ],
+    ]
+    assert all("reset" not in call for call in serve_calls)
 
 
 def test_setup_rejects_non_macos(tmp_path: Path) -> None:

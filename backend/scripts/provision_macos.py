@@ -41,6 +41,62 @@ class CommandResult:
     stderr: str = ""
 
 
+@dataclass(frozen=True)
+class ServeMappingState:
+    exact: bool
+    absent: bool
+    conflict: str | None
+
+
+def parse_serve_status(
+    payload: str, dns_name: str, port: int = DEFAULT_PORT
+) -> ServeMappingState:
+    try:
+        status = json.loads(payload)
+    except (TypeError, ValueError):
+        return ServeMappingState(False, False, "malformed Serve status JSON")
+    if not isinstance(status, dict):
+        return ServeMappingState(False, False, "malformed Serve status document")
+
+    tcp = status.get("TCP")
+    web = status.get("Web")
+    if not isinstance(tcp, dict) or not isinstance(web, dict):
+        return ServeMappingState(False, False, "malformed TCP or Web Serve status")
+
+    port_key = str(port)
+    web_key = f"{dns_name.strip().rstrip('.')}:{port}"
+    tcp_present = port_key in tcp
+    web_present = web_key in web
+    if not tcp_present and not web_present:
+        return ServeMappingState(False, True, None)
+    if tcp_present != web_present:
+        return ServeMappingState(False, False, "partial Serve mapping")
+
+    tcp_entry = tcp[port_key]
+    if (
+        not isinstance(tcp_entry, dict)
+        or set(tcp_entry) != {"HTTPS"}
+        or tcp_entry["HTTPS"] is not True
+    ):
+        return ServeMappingState(False, False, "TCP entry is not exact HTTPS")
+
+    web_entry = web[web_key]
+    if not isinstance(web_entry, dict) or set(web_entry) != {"Handlers"}:
+        return ServeMappingState(False, False, "Web entry is malformed")
+    handlers = web_entry["Handlers"]
+    if not isinstance(handlers, dict) or set(handlers) != {"/"}:
+        return ServeMappingState(False, False, "Web entry has a conflicting root handler")
+    root = handlers["/"]
+    expected_proxy = f"http://127.0.0.1:{port}"
+    if (
+        not isinstance(root, dict)
+        or set(root) != {"Proxy"}
+        or root["Proxy"] != expected_proxy
+    ):
+        return ServeMappingState(False, False, "root handler has a conflicting proxy")
+    return ServeMappingState(True, False, None)
+
+
 class CommandRunner(Protocol):
     def run(
         self,
@@ -398,48 +454,60 @@ class MacProvisioner:
         layout, tailscale = self._prepare_layout()
         self.layout = layout
         self.tailscale = tailscale
+        serve_mapping_added = self._require_serve_mapping(layout, tailscale)
+        try:
 
-        self.output(f"Request a Tailscale HTTPS certificate for {layout.dns_name}.")
-        if not self.confirm("request the Tailscale HTTPS certificate"):
-            raise ProvisioningError("certificate request cancelled")
-        self.writer.mkdir(layout.support_dir)
-        certificate = self.runner.run(
-            [
-                str(tailscale),
-                "cert",
-                "--cert-file",
-                str(layout.support_dir / "server.crt"),
-                "--key-file",
-                str(layout.support_dir / "server.key"),
-                layout.dns_name,
-            ]
-        )
-        if certificate.returncode:
-            raise ProvisioningError("Tailscale certificate creation failed; setup stopped")
-        self.writer.chmod(layout.support_dir / "server.crt", 0o644)
-        self.writer.chmod(layout.support_dir / "server.key", 0o600)
+            self.output(f"Request a Tailscale HTTPS certificate for {layout.dns_name}.")
+            if not self.confirm("request the Tailscale HTTPS certificate"):
+                raise ProvisioningError("certificate request cancelled")
+            self.writer.mkdir(layout.support_dir)
+            certificate = self.runner.run(
+                [
+                    str(tailscale),
+                    "cert",
+                    "--cert-file",
+                    str(layout.support_dir / "server.crt"),
+                    "--key-file",
+                    str(layout.support_dir / "server.key"),
+                    layout.dns_name,
+                ]
+            )
+            if certificate.returncode:
+                raise ProvisioningError(
+                    "Tailscale certificate creation failed; setup stopped"
+                )
+            self.writer.chmod(layout.support_dir / "server.crt", 0o644)
+            self.writer.chmod(layout.support_dir / "server.key", 0o600)
 
-        existing_token = None if from_bws_child else self.keychain.get(KEYCHAIN_SERVICE)
-        token = (
-            bws_token
-            if from_bws_child
-            else self.token_factory()
-            if existing_token is None
-            else existing_token
-        )
-        if not token:
-            raise ProvisioningError("no server token was provided")
-        replace_token = from_bws_child or existing_token is None
-        self.output("Install and start the Harness Voice LaunchAgents.")
-        if not self.confirm("install and start the LaunchAgents"):
-            raise ProvisioningError("LaunchAgent installation cancelled")
-        self._unload_existing_agents(layout)
-        if replace_token:
-            self.keychain.set(KEYCHAIN_SERVICE, token)
-        self._write_assets(layout)
-        self._start_agents(layout)
-        self._require_https_health(layout, token)
-        self.output(f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}")
+            existing_token = (
+                None if from_bws_child else self.keychain.get(KEYCHAIN_SERVICE)
+            )
+            token = (
+                bws_token
+                if from_bws_child
+                else self.token_factory()
+                if existing_token is None
+                else existing_token
+            )
+            if not token:
+                raise ProvisioningError("no server token was provided")
+            replace_token = from_bws_child or existing_token is None
+            self.output("Install and start the Harness Voice LaunchAgents.")
+            if not self.confirm("install and start the LaunchAgents"):
+                raise ProvisioningError("LaunchAgent installation cancelled")
+            self._unload_existing_agents(layout)
+            if replace_token:
+                self.keychain.set(KEYCHAIN_SERVICE, token)
+            self._write_assets(layout)
+            self._start_agents(layout)
+            self._require_https_health(layout, token)
+            self.output(
+                f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}"
+            )
+        except Exception:
+            if serve_mapping_added:
+                self._remove_serve_mapping(tailscale)
+            raise
 
     def create_pairing_qr(self) -> str:
         layout = self.layout or self.discover(
@@ -639,6 +707,61 @@ class MacProvisioner:
                 "bws-project could not provide the registered server token; "
                 "check the project registration and try again"
             )
+
+    def _require_serve_mapping(
+        self, layout: MacServerLayout, tailscale: Path
+    ) -> bool:
+        state = self._serve_mapping_state(layout, tailscale)
+        if state.exact:
+            return False
+        if state.conflict is not None:
+            raise ProvisioningError(f"Tailscale Serve conflict: {state.conflict}")
+
+        add = self.runner.run(
+            [
+                str(tailscale),
+                "serve",
+                "--bg",
+                f"--https={DEFAULT_PORT}",
+                f"http://127.0.0.1:{DEFAULT_PORT}",
+            ]
+        )
+        if add.returncode:
+            raise ProvisioningError("Tailscale Serve mapping creation failed")
+
+        try:
+            verified = self._serve_mapping_state(layout, tailscale)
+            if not verified.exact:
+                detail = verified.conflict or "mapping remained absent"
+                raise ProvisioningError(
+                    f"failed to verify exact Tailscale Serve mapping: {detail}"
+                )
+        except Exception:
+            self._remove_serve_mapping(tailscale)
+            raise
+        return True
+
+    def _serve_mapping_state(
+        self, layout: MacServerLayout, tailscale: Path
+    ) -> ServeMappingState:
+        result = self.runner.run(
+            [str(tailscale), "serve", "status", "--json"]
+        )
+        if result.returncode:
+            raise ProvisioningError("Tailscale Serve status inspection failed")
+        return parse_serve_status(result.stdout, layout.dns_name, DEFAULT_PORT)
+
+    def _remove_serve_mapping(self, tailscale: Path) -> None:
+        result = self.runner.run(
+            [
+                str(tailscale),
+                "serve",
+                f"--https={DEFAULT_PORT}",
+                "off",
+            ]
+        )
+        if result.returncode:
+            raise ProvisioningError("Tailscale Serve mapping rollback failed")
 
     def _run_checked(self, args: list[str], action: str) -> None:
         result = self.runner.run(args)
