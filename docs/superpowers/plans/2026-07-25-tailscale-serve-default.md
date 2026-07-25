@@ -144,6 +144,7 @@ git commit -m "feat: validate Tailscale Serve proxy mode"
 
 **Files:**
 - Modify: `backend/scripts/provisioning.py`
+- Modify: `backend/scripts/provision_macos.py`
 - Test: `backend/tests/test_provisioning.py`
 
 **Interfaces:**
@@ -179,7 +180,7 @@ Expected: old `0.0.0.0` and cert-path output fails new assertions.
 
 Update existing renderers rather than introducing a parallel public setup path. Preserve `plistlib` and `shlex.quote` patterns. The wrapper still retrieves Keychain token into a shell-local variable and exports it only to the final child. The plist carries only non-secret stable environment.
 
-Remove renewal rendering imports/calls from guided provisioning in the same task only when tests prove no caller remains; do not alter advanced direct-TLS backend configuration.
+Remove renewal rendering imports/calls from guided provisioning in this task, including `_write_assets` in `provision_macos.py`; do not alter advanced direct-TLS backend configuration. Add a setup-level assertion that no renewal asset is written or bootstrapped.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -187,7 +188,7 @@ Run:
 
 ```bash
 uv run --directory backend --extra dev pytest tests/test_provisioning.py -k 'backend_wrapper or backend_plist or renew' -v
-uv run --directory backend --extra dev ruff check scripts/provisioning.py tests/test_provisioning.py
+uv run --directory backend --extra dev ruff check scripts/provisioning.py scripts/provision_macos.py tests/test_provisioning.py
 ```
 
 Expected: all selected tests pass; Ruff clean.
@@ -195,7 +196,7 @@ Expected: all selected tests pass; Ruff clean.
 Commit:
 
 ```bash
-git add backend/scripts/provisioning.py backend/tests/test_provisioning.py
+git add backend/scripts/provisioning.py backend/scripts/provision_macos.py backend/tests/test_provisioning.py
 git commit -m "feat: render Tailscale Serve backend assets"
 ```
 
@@ -247,7 +248,7 @@ With `FakeRunner`, assert:
 - absent mapping: one exact `serve --bg --https=8765 http://127.0.0.1:8765`, then status recheck;
 - conflict: `ProvisioningError` before file/Keychain/launchctl mutation;
 - no command includes `serve reset`;
-- rollback of a mapping added by this run uses the matching scoped `off` command and never touches other ports.
+- rollback of a mapping added by this run uses exactly `tailscale serve --https=8765 off` and never touches other ports. This argv is pinned to the official CLI contract; Task 6 also exercises it by adding/removing a temporary unused-port mapping before live migration.
 
 - [ ] **Step 3: Run tests and confirm RED**
 
@@ -282,12 +283,13 @@ git commit -m "feat: manage an exact Tailscale Serve mapping"
 
 **Interfaces:**
 - Produces an internal deployment snapshot/rollback boundary covering generated assets, Keychain state, relevant loaded agents, and Serve mapping ownership.
-- Recognized labels: `io.harnessvoice.backend`, `io.harnessvoice.cert-renew`, and legacy `dev.finklea.harnessvoice.backend`.
+- Defines `LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"` in `provision_macos.py`; only this exact legacy label plus the neutral backend/renewal labels are migration-owned.
+- Extends `Keychain` with `delete(service: str) -> None` so rollback can restore a previously absent item; the native and fake implementations must implement it.
 - Consumes: Task 3 exact Serve state; Task 2 staged wrapper/plist.
 
-- [ ] **Step 1: Extend injected filesystem seams for atomic staging and restoration**
+- [ ] **Step 1: Extend injected filesystem and Keychain seams for exact restoration**
 
-Add only operations needed by real rollback and tests: read optional text/bytes, existence, replace/rename, and unlink. Implement them in `LocalFileWriter`; extend the fake writer accordingly. Never read secret dotenv files.
+Add only operations needed by real rollback and tests: read optional text/bytes, existence, replace/rename, unlink, and Keychain delete. Implement them in `LocalFileWriter`, the native Keychain implementation, and their fakes. Test both prior-token-present and prior-token-absent rollback; the absent case must delete the newly created item rather than storing an empty token. Never read secret dotenv files.
 
 - [ ] **Step 2: Add cutover and legacy migration tests**
 
@@ -295,17 +297,21 @@ Assert setup:
 
 1. snapshots prior neutral/legacy agent loaded states and existing generated assets;
 2. stages wrapper/plist before stopping the old backend;
-3. reuses/adds the Serve mapping per Task 3;
-4. boots out the loaded neutral or recognized legacy backend only at cutover;
-5. atomically installs and bootstraps only `io.harnessvoice.backend`;
-6. verifies public HTTPS/non-mock/authenticated real Hermes;
-7. after success, boots out/removes obsolete neutral renewal and recognized legacy generated assets.
+3. validates the staged wrapper with `bash -n` and parses the staged plist before any Keychain, Serve, or launchctl mutation;
+4. reuses/adds the Serve mapping per Task 3;
+5. boots out the loaded neutral or exact recognized legacy backend only at cutover;
+6. atomically installs and bootstraps only `io.harnessvoice.backend`;
+7. verifies public HTTPS/non-mock/authenticated real Hermes;
+8. crosses an explicit commit boundary;
+9. after commit, boots out/removes obsolete neutral renewal and recognized legacy generated assets.
 
 Add a live-port-collision regression proving the legacy agent is stopped before neutral bootstrap.
 
 - [ ] **Step 3: Add table-driven rollback tests**
 
-Inject failure at each mutating boundary: Keychain set, Serve add/recheck, asset replace, old bootout, neutral bootstrap/kickstart, public health, and authenticated harness listing. For every post-mutation failure assert prior files/token/loaded agents are restored and a newly added Serve mapping is removed. Existing exact mapping remains untouched. Assert rollback failure is reported without masking the original boundary and without exposing token values.
+Inject pre-commit failure at each mutating boundary: Keychain set, Serve add/recheck, staged wrapper/plist validation, asset replace, old bootout, neutral bootstrap/kickstart, public health, and authenticated harness listing. For every pre-commit post-mutation failure assert prior files/token presence-or-absence/loaded agents are restored and a newly added Serve mapping is removed. Existing exact mapping remains untouched. Assert rollback failure reports both the original and rollback boundary without exposing token values.
+
+Inject cleanup failures after the explicit commit boundary (renewal bootout/unlink and legacy-asset unlink). Assert the verified neutral backend, token, installed files, and owned Serve mapping remain committed; report incomplete cleanup and do not roll back the working deployment.
 
 - [ ] **Step 4: Run migration tests and confirm RED**
 
@@ -319,7 +325,7 @@ Expected: missing snapshot/atomic writer behavior and wrong existing unload/star
 
 - [ ] **Step 5: Implement staged cutover and rollback**
 
-Keep transaction logic in one bounded internal helper rather than adding conditionals throughout `setup`. Snapshot secrets in memory only. Stage under the destination directory, then use atomic replace. On success, perform obsolete renewal/legacy cleanup last. On any failure, restore in reverse mutation order and restart only agents previously loaded.
+Keep transaction logic in one bounded internal helper rather than adding conditionals throughout `setup`. Snapshot secrets in memory only. Stage under the destination directory; validate `bash -n` and plist parsing before token, Serve, or agent mutation; then use atomic replace. After successful public/authenticated verification, mark the deployment committed and perform obsolete renewal/legacy cleanup. Pre-commit failures restore in reverse mutation order and restart only agents previously loaded. Post-commit cleanup failures preserve the verified deployment and report incomplete cleanup.
 
 Update `setup` to remove `tailscale cert`; confirmation copy says it will configure a persistent tailnet-only HTTPS proxy and install one backend LaunchAgent.
 
@@ -361,7 +367,8 @@ git commit -m "feat: migrate guided servers to Tailscale Serve"
 Cover:
 
 - missing Keychain token → refusal, zero ticket creations;
-- wrong/conflicting/missing Serve mapping → refusal;
+- Serve mode with wrong/conflicting/missing mapping → refusal;
+- valid direct-TLS mode with no Serve mapping → proceeds; incomplete direct TLS (one of cert/key missing) → refusal;
 - public health not HTTPS or mock true → refusal;
 - authenticated harness listing missing available Hermes → refusal;
 - all gates pass → exactly one ticket and QR; pairing secret is not separately written to captured output.
@@ -429,6 +436,16 @@ xcodebuild -project ios/HermesVoice/HermesVoice.xcodeproj -scheme HermesVoice -d
 Expected: backend and iOS suites pass; changed files Ruff-clean.
 
 - [ ] **Step 2: Run live guided setup on Mandalore**
+
+Before touching port 8765, prove the installed CLI accepts the documented scoped removal form on an unused port:
+
+```bash
+tailscale serve --bg --https=18765 http://127.0.0.1:9
+tailscale serve status --json
+tailscale serve --https=18765 off
+```
+
+Expected: the temporary 18765 mapping appears, then disappears; existing 8765 and all unrelated mappings remain byte-for-byte equivalent in parsed status.
 
 From repository root:
 

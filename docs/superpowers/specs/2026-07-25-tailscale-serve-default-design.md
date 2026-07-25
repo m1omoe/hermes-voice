@@ -81,7 +81,7 @@ Policy:
 - absent mapping: add it and record ownership for rollback;
 - any conflicting TCP/Web mapping on port 8765: abort before changing agents, files, Keychain, or Serve state.
 
-If this setup run added the mapping and a later step fails, remove only that mapping using the matching `tailscale serve --https=8765 http://127.0.0.1:8765 off` form. Never alter unrelated Serve ports, hosts, paths, or services.
+If this setup run added the mapping and a later pre-commit step fails, remove only that mapping with the documented scoped command `tailscale serve --https=8765 off`. Never alter unrelated Serve ports, hosts, paths, or services.
 
 ## Transactional migration
 
