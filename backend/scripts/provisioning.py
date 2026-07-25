@@ -32,6 +32,7 @@ def render_backend_wrapper(
     uv_path = shlex.quote(str(layout.uv))
     hermes_bin = shlex.quote(str(layout.hermes_bin))
     backend_dir = shlex.quote(str(layout.repo_root / "backend"))
+    public_host = shlex.quote(layout.dns_name)
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -48,6 +49,7 @@ HERMES_BIN={hermes_bin} \\
 HERMES_VOICE_HOST="127.0.0.1" \\
 HERMES_VOICE_TRUSTED_HTTPS_PROXY="tailscale-serve" \\
 FORWARDED_ALLOW_IPS="127.0.0.1" \\
+HERMES_VOICE_PUBLIC_HOST={public_host} \\
 HERMES_VOICE_DISABLE_DOTENV="1" \\
 HERMES_VOICE_TOKEN="$TOKEN" \\
 exec "$UV" run --directory {backend_dir} python -m app
@@ -65,6 +67,7 @@ def render_backend_plist(layout: MacServerLayout, wrapper_path: Path) -> str:
                 "HERMES_VOICE_TRUSTED_HTTPS_PROXY": "tailscale-serve",
                 "FORWARDED_ALLOW_IPS": "127.0.0.1",
                 "HERMES_BIN": str(layout.hermes_bin),
+                "HERMES_VOICE_PUBLIC_HOST": layout.dns_name,
             },
             "WorkingDirectory": str(backend_dir),
             "RunAtLoad": True,

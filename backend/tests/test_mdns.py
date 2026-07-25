@@ -54,3 +54,34 @@ def test_serve_mode_advertises_https(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["scheme"] == "https"
+
+
+def test_serve_mode_advertises_the_magic_dns_hostname(monkeypatch):
+    calls = []
+
+    async def fake_start_mdns(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setenv("HERMES_VOICE_TOKEN", "test-token")
+    monkeypatch.setenv("HERMES_VOICE_HOST", "127.0.0.1")
+    monkeypatch.setenv(
+        "HERMES_VOICE_TRUSTED_HTTPS_PROXY", "tailscale-serve"
+    )
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    monkeypatch.setenv("HERMES_VOICE_PUBLIC_HOST", "mandalore.tailnet.ts.net")
+    monkeypatch.setattr(main, "_should_auto_mock", lambda settings: False)
+    monkeypatch.setattr(mdns, "start_mdns", fake_start_mdns)
+    reset_settings_cache()
+    try:
+        with build_client(hermes=FakeHermes(), stt=None, tts=None):
+            pass
+    finally:
+        reset_settings_cache()
+
+    assert len(calls) == 1
+    assert calls[0]["scheme"] == "https"
+    # Serve mode terminates TLS on the MagicDNS name, not the LAN IP — the
+    # Bonjour TXT record must carry that hostname or the iOS client builds
+    # a URL the certificate/proxy mapping won't match.
+    assert calls[0]["public_host"] == "mandalore.tailnet.ts.net"

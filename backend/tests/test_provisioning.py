@@ -208,6 +208,7 @@ def test_backend_plist_carries_serve_mode_environment_only(tmp_path: Path) -> No
     assert env["HERMES_VOICE_TRUSTED_HTTPS_PROXY"] == "tailscale-serve"
     assert env["FORWARDED_ALLOW_IPS"] == "127.0.0.1"
     assert env["HERMES_BIN"] == str(layout.hermes_bin)
+    assert env["HERMES_VOICE_PUBLIC_HOST"] == layout.dns_name
     assert "HERMES_VOICE_CERT" not in env
     assert "HERMES_VOICE_KEY" not in env
     assert "HERMES_VOICE_TOKEN" not in env
@@ -230,6 +231,7 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
     assert 'HERMES_VOICE_TRUSTED_HTTPS_PROXY="tailscale-serve"' in rendered
     assert 'FORWARDED_ALLOW_IPS="127.0.0.1"' in rendered
     assert f"HERMES_BIN={shlex.quote(str(layout.hermes_bin))}" in rendered
+    assert f"HERMES_VOICE_PUBLIC_HOST={shlex.quote(layout.dns_name)}" in rendered
     assert "HERMES_VOICE_CERT" not in rendered
     assert "HERMES_VOICE_KEY" not in rendered
     assert "server.crt" not in rendered
