@@ -25,8 +25,6 @@ from scripts.provisioning import (
     MacServerLayout,
     render_backend_plist,
     render_backend_wrapper,
-    render_renew_plist,
-    render_renew_script,
 )
 
 KEYCHAIN_SERVICE = "HERMES_VOICE_TOKEN"
@@ -438,7 +436,7 @@ class MacProvisioner:
         self._unload_existing_agents(layout)
         if replace_token:
             self.keychain.set(KEYCHAIN_SERVICE, token)
-        self._write_assets(layout, tailscale)
+        self._write_assets(layout)
         self._start_agents(layout)
         self._require_https_health(layout, token)
         self.output(f"Harness Voice is ready at https://{layout.dns_name}:{DEFAULT_PORT}")
@@ -514,39 +512,32 @@ class MacProvisioner:
             tailscale,
         )
 
-    def _write_assets(self, layout: MacServerLayout, tailscale: Path) -> None:
+    def _write_assets(self, layout: MacServerLayout) -> None:
         wrapper = layout.support_dir / "run-backend"
-        renew = layout.support_dir / "renew-cert"
         launch_agents = layout.home / "Library/LaunchAgents"
         backend_plist = launch_agents / f"{layout.backend_label}.plist"
-        renew_plist = launch_agents / f"{layout.renew_label}.plist"
         self.writer.write_text(
             wrapper,
             render_backend_wrapper(layout, KEYCHAIN_SERVICE, str(self.user_id)),
         )
         self.writer.chmod(wrapper, 0o755)
-        self.writer.write_text(renew, render_renew_script(layout, tailscale))
-        self.writer.chmod(renew, 0o755)
         self.writer.write_text(backend_plist, render_backend_plist(layout, wrapper))
-        self.writer.write_text(renew_plist, render_renew_plist(layout, renew))
 
     def _unload_existing_agents(self, layout: MacServerLayout) -> None:
         uid = f"gui/{self.user_id}"
-        for label in (layout.backend_label, layout.renew_label):
-            service = f"{uid}/{label}"
-            result = self.runner.run(["launchctl", "print", service])
-            if result.returncode == 0:
-                self._run_checked(
-                    ["launchctl", "bootout", service],
-                    "existing LaunchAgent shutdown",
-                )
+        service = f"{uid}/{layout.backend_label}"
+        result = self.runner.run(["launchctl", "print", service])
+        if result.returncode == 0:
+            self._run_checked(
+                ["launchctl", "bootout", service],
+                "existing LaunchAgent shutdown",
+            )
 
     def _start_agents(self, layout: MacServerLayout) -> None:
         uid = f"gui/{self.user_id}"
         launch_agents = layout.home / "Library/LaunchAgents"
-        for label in (layout.backend_label, layout.renew_label):
-            plist = launch_agents / f"{label}.plist"
-            self._run_checked(["launchctl", "bootstrap", uid, str(plist)], "LaunchAgent bootstrap")
+        plist = launch_agents / f"{layout.backend_label}.plist"
+        self._run_checked(["launchctl", "bootstrap", uid, str(plist)], "LaunchAgent bootstrap")
         self._run_checked(
             ["launchctl", "kickstart", "-k", f"{uid}/{layout.backend_label}"],
             "backend LaunchAgent start",

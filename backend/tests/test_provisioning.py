@@ -19,8 +19,6 @@ from scripts.provisioning import (
     MacServerLayout,
     render_backend_plist,
     render_backend_wrapper,
-    render_renew_plist,
-    render_renew_script,
 )
 
 
@@ -43,7 +41,6 @@ def test_default_launchagent_identity_is_product_owned(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
     assert layout.backend_label == "io.harnessvoice.backend"
-    assert layout.renew_label == "io.harnessvoice.cert-renew"
 
 
 def test_backend_assets_use_detected_paths_only(tmp_path: Path) -> None:
@@ -53,12 +50,15 @@ def test_backend_assets_use_detected_paths_only(tmp_path: Path) -> None:
     values = load_plist(rendered)
 
     assert str(layout.repo_root / "backend") in rendered
-    assert "mandalore.tailnet.ts.net" in rendered
     assert values["Label"] == layout.backend_label
     assert values["ProgramArguments"] == [str(layout.support_dir / "run-backend")]
     assert str(layout.repo_root / "backend") == values["WorkingDirectory"]
     assert "/Users/tfinklea" not in rendered
     assert "scadrial" not in rendered
+    assert "HERMES_VOICE_CERT" not in rendered
+    assert "HERMES_VOICE_KEY" not in rendered
+    assert "server.crt" not in rendered
+    assert "server.key" not in rendered
 
 
 def test_backend_plist_escapes_dynamic_paths(tmp_path: Path) -> None:
@@ -77,6 +77,22 @@ def test_backend_plist_escapes_dynamic_paths(tmp_path: Path) -> None:
     assert values["ProgramArguments"] == [str(layout.support_dir / "run-backend")]
 
 
+def test_backend_plist_carries_serve_mode_environment_only(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+
+    rendered = render_backend_plist(layout, layout.support_dir / "run-backend")
+    values = load_plist(rendered)
+    env = values["EnvironmentVariables"]
+
+    assert env["HERMES_VOICE_HOST"] == "127.0.0.1"
+    assert env["HERMES_VOICE_TRUSTED_HTTPS_PROXY"] == "tailscale-serve"
+    assert env["FORWARDED_ALLOW_IPS"] == "127.0.0.1"
+    assert env["HERMES_BIN"] == str(layout.hermes_bin)
+    assert "HERMES_VOICE_CERT" not in env
+    assert "HERMES_VOICE_KEY" not in env
+    assert "HERMES_VOICE_TOKEN" not in env
+
+
 def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
@@ -90,8 +106,14 @@ def test_backend_wrapper_looks_up_keychain_token_for_child_only(tmp_path: Path) 
     assert "exec env" not in rendered
     assert f"UV={shlex.quote(str(layout.uv))}" in rendered
     assert f'exec "$UV" run --directory {layout.repo_root / "backend"} python -m app' in rendered
-    assert 'HERMES_VOICE_HOST="0.0.0.0"' in rendered
-    assert f"HERMES_VOICE_PUBLIC_HOST={shlex.quote(layout.dns_name)}" in rendered
+    assert 'HERMES_VOICE_HOST="127.0.0.1"' in rendered
+    assert 'HERMES_VOICE_TRUSTED_HTTPS_PROXY="tailscale-serve"' in rendered
+    assert 'FORWARDED_ALLOW_IPS="127.0.0.1"' in rendered
+    assert f"HERMES_BIN={shlex.quote(str(layout.hermes_bin))}" in rendered
+    assert "HERMES_VOICE_CERT" not in rendered
+    assert "HERMES_VOICE_KEY" not in rendered
+    assert "server.crt" not in rendered
+    assert "server.key" not in rendered
     assert 'echo "$TOKEN"' not in rendered
     assert "export HERMES_VOICE_TOKEN=" not in rendered
     assert "if [[ -z \"$TOKEN\" ]]" in rendered
@@ -116,7 +138,7 @@ def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
     lines = rendered.splitlines()
     exec_index = next(i for i, line in enumerate(lines) if line.startswith('exec "$UV" run'))
     assignment_indices = [
-        i for i, line in enumerate(lines) if line.startswith("HERMES_VOICE_")
+        i for i, line in enumerate(lines) if line.startswith("HERMES_")
     ]
     assert assignment_indices
     assert max(assignment_indices) < exec_index
@@ -125,74 +147,29 @@ def test_backend_wrapper_places_environment_before_exec_and_is_valid_shell(
     )
 
 
-def test_backend_wrapper_uses_shared_generated_certificate_paths(tmp_path: Path) -> None:
+def test_backend_wrapper_quotes_dynamic_hermes_path(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
 
     rendered = render_backend_wrapper(layout, "custom-service")
 
-    assert f"HERMES_VOICE_CERT={shlex.quote(str(layout.support_dir / 'server.crt'))}" in rendered
-    assert f"HERMES_VOICE_KEY={shlex.quote(str(layout.support_dir / 'server.key'))}" in rendered
+    assert f"HERMES_BIN={shlex.quote(str(layout.hermes_bin))}" in rendered
 
 
-def test_renew_script_uses_the_discovered_tailscale_executable(tmp_path: Path) -> None:
-    layout = make_layout(tmp_path)
-    tailscale = Path("/opt/custom/bin/tailscale")
+def test_setup_does_not_write_or_bootstrap_renewal_assets(tmp_path: Path) -> None:
+    provisioner, _, writer = make_provisioner(tmp_path, FakeRunner())
 
-    rendered = render_renew_script(layout, tailscale)
+    provisioner.setup()
 
-    assert f"TAILSCALE={shlex.quote(str(tailscale))}" in rendered
-    assert "/Applications/Tailscale.app/Contents/MacOS/Tailscale" not in rendered
-
-
-def test_renew_script_renews_and_restarts_generated_backend(tmp_path: Path) -> None:
-    layout = make_layout(tmp_path)
-
-    rendered = render_renew_script(layout)
-
-    assert "TAILSCALE" in rendered
-    assert (
-        'cert --cert-file "$DEST_DIR/server.crt" '
-        '--key-file "$DEST_DIR/server.key" "$DNS_NAME"'
-    ) in rendered
-    assert f"DNS_NAME={shlex.quote(layout.dns_name)}" in rendered
-    assert "TAILSCALE_CERT_DIR" not in rendered
-    assert "Library/Containers/io.tailscale.ipn.macos" not in rendered
-    assert f"DEST_DIR={shlex.quote(str(layout.support_dir))}" in rendered
-    assert 'chmod 644 "$DEST_DIR/server.crt"' in rendered
-    assert 'chmod 600 "$DEST_DIR/server.key"' in rendered
-    assert 'launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"' in rendered
-    assert layout.renew_label not in rendered
-
-
-def test_renew_script_quotes_custom_backend_label_without_literal_quotes(tmp_path: Path) -> None:
-    layout = MacServerLayout(
-        repo_root=tmp_path / "checkout",
-        home=tmp_path / "home",
-        uv=Path("/opt/custom/bin/uv"),
-        hermes_bin=Path("/Users/tester/.local/bin/hermes"),
-        dns_name="mandalore.tailnet.ts.net",
-        support_dir=tmp_path / "Library/Application Support/Harness Voice",
-        backend_label="custom.backend label",
-    )
-
-    rendered = render_renew_script(layout)
-
-    assert f"BACKEND_LABEL={shlex.quote(layout.backend_label)}" in rendered
-    assert 'launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"' in rendered
-    assert f"/$(id -u)/{shlex.quote(layout.backend_label)}" not in rendered
-
-
-def test_renew_plist_points_at_script_and_uses_renew_label(tmp_path: Path) -> None:
-    layout = make_layout(tmp_path)
-    script_path = layout.support_dir / "renew-cert"
-
-    values = load_plist(render_renew_plist(layout, script_path))
-
-    assert values["Label"] == layout.renew_label
-    assert values["ProgramArguments"] == ["/bin/bash", str(script_path)]
-    assert values["StartInterval"] == 2_592_000
-    assert values["RunAtLoad"] is False
-
+    support = make_layout(tmp_path).support_dir
+    assert support / "renew-cert" not in writer.text
+    bootstrap_targets = [
+        arg[-1]
+        for call in provisioner.runner.calls
+        if len(call) >= 1 and len(call[0]) >= 2 and call[0][0] == "launchctl"
+        and call[0][1] == "bootstrap"
+        for arg in [call[0][2:]]
+    ]
+    assert not any("renew" in target for target in bootstrap_targets)
 
 class FakeRunner:
     def __init__(
@@ -489,18 +466,8 @@ def test_setup_generates_product_owned_launchagent_filenames(
 
     launch_agents = make_layout(tmp_path).home / "Library/LaunchAgents"
     assert launch_agents / "io.harnessvoice.backend.plist" in writer.text
-    assert launch_agents / "io.harnessvoice.cert-renew.plist" in writer.text
+    assert launch_agents / "io.harnessvoice.cert-renew.plist" not in writer.text
     assert all("dev.finklea" not in str(path) for path in writer.text)
-
-
-def test_setup_passes_discovered_tailscale_to_renewal_asset(tmp_path: Path) -> None:
-    provisioner, _, writer = make_provisioner(tmp_path, FakeRunner())
-
-    provisioner.setup()
-
-    rendered = writer.text[make_layout(tmp_path).support_dir / "renew-cert"]
-    assert "TAILSCALE=/opt/custom/bin/tailscale" in rendered
-    assert "/Applications/Tailscale.app/Contents/MacOS/Tailscale" not in rendered
 
 
 def test_setup_requests_certificate_directly_into_generated_support_paths(
@@ -739,11 +706,11 @@ def test_setup_unloads_existing_agents_before_replacing_keychain_token(tmp_path:
     provisioner.setup()
 
     operations = [call[0][:2] for call in runner.calls if call[0][0] == "launchctl"]
-    assert operations[:4] == [
+    assert operations == [
         ["launchctl", "print"],
         ["launchctl", "bootout"],
-        ["launchctl", "print"],
-        ["launchctl", "bootout"],
+        ["launchctl", "bootstrap"],
+        ["launchctl", "kickstart"],
     ]
     bootout_indexes = [
         index for index, call in enumerate(runner.calls) if call[0][:2] == ["launchctl", "bootout"]

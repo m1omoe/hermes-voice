@@ -16,11 +16,6 @@ class MacServerLayout:
     dns_name: str
     support_dir: Path
     backend_label: str = "io.harnessvoice.backend"
-    renew_label: str = "io.harnessvoice.cert-renew"
-
-
-def _certificate_paths(layout: MacServerLayout) -> tuple[Path, Path]:
-    return layout.support_dir / "server.crt", layout.support_dir / "server.key"
 
 
 def _render_plist(payload: dict[str, object]) -> str:
@@ -32,15 +27,11 @@ def render_backend_wrapper(
     keychain_service: str,
     keychain_account: str | None = None,
 ) -> str:
-    cert_path, key_path = _certificate_paths(layout)
     security_service = shlex.quote(keychain_service)
     security_account = shlex.quote(keychain_account or str(os.getuid()))
     uv_path = shlex.quote(str(layout.uv))
     hermes_bin = shlex.quote(str(layout.hermes_bin))
     backend_dir = shlex.quote(str(layout.repo_root / "backend"))
-    cert_path = shlex.quote(str(cert_path))
-    key_path = shlex.quote(str(key_path))
-    public_host = shlex.quote(layout.dns_name)
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -54,10 +45,9 @@ fi
 
 UV={uv_path}
 HERMES_BIN={hermes_bin} \\
-HERMES_VOICE_HOST="0.0.0.0" \\
-HERMES_VOICE_CERT={cert_path} \\
-HERMES_VOICE_KEY={key_path} \\
-HERMES_VOICE_PUBLIC_HOST={public_host} \\
+HERMES_VOICE_HOST="127.0.0.1" \\
+HERMES_VOICE_TRUSTED_HTTPS_PROXY="tailscale-serve" \\
+FORWARDED_ALLOW_IPS="127.0.0.1" \\
 HERMES_VOICE_DISABLE_DOTENV="1" \\
 HERMES_VOICE_TOKEN="$TOKEN" \\
 exec "$UV" run --directory {backend_dir} python -m app
@@ -65,18 +55,16 @@ exec "$UV" run --directory {backend_dir} python -m app
 
 
 def render_backend_plist(layout: MacServerLayout, wrapper_path: Path) -> str:
-    cert_path, key_path = _certificate_paths(layout)
     backend_dir = layout.repo_root / "backend"
     return _render_plist(
         {
             "Label": layout.backend_label,
             "ProgramArguments": [str(wrapper_path)],
             "EnvironmentVariables": {
-                "HERMES_VOICE_HOST": "0.0.0.0",
-                "HERMES_VOICE_CERT": str(cert_path),
-                "HERMES_VOICE_KEY": str(key_path),
-                "HERMES_VOICE_PUBLIC_HOST": layout.dns_name,
-                "HERMES_VOICE_DISABLE_DOTENV": "1",
+                "HERMES_VOICE_HOST": "127.0.0.1",
+                "HERMES_VOICE_TRUSTED_HTTPS_PROXY": "tailscale-serve",
+                "FORWARDED_ALLOW_IPS": "127.0.0.1",
+                "HERMES_BIN": str(layout.hermes_bin),
             },
             "WorkingDirectory": str(backend_dir),
             "RunAtLoad": True,
@@ -86,42 +74,3 @@ def render_backend_plist(layout: MacServerLayout, wrapper_path: Path) -> str:
             "StandardErrorPath": str(layout.support_dir / "backend.log"),
         }
     )
-
-
-def render_renew_plist(layout: MacServerLayout, renew_script_path: Path) -> str:
-    return _render_plist(
-        {
-            "Label": layout.renew_label,
-            "ProgramArguments": ["/bin/bash", str(renew_script_path)],
-            "StartInterval": 2_592_000,
-            "RunAtLoad": False,
-            "StandardOutPath": str(layout.support_dir / "cert-renew.log"),
-            "StandardErrorPath": str(layout.support_dir / "cert-renew.log"),
-        }
-    )
-
-
-def render_renew_script(
-    layout: MacServerLayout, tailscale_path: Path | str | None = None
-) -> str:
-    tailscale = str(
-        tailscale_path or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-    )
-    domain = shlex.quote(layout.dns_name)
-    tailscale = shlex.quote(tailscale)
-    support_dir = shlex.quote(str(layout.support_dir))
-    backend_label = shlex.quote(layout.backend_label)
-    return f"""#!/usr/bin/env bash
-set -euo pipefail
-
-DNS_NAME={domain}
-TAILSCALE={tailscale}
-DEST_DIR={support_dir}
-BACKEND_LABEL={backend_label}
-
-mkdir -p "$DEST_DIR"
-"$TAILSCALE" cert --cert-file "$DEST_DIR/server.crt" --key-file "$DEST_DIR/server.key" "$DNS_NAME"
-chmod 644 "$DEST_DIR/server.crt"
-chmod 600 "$DEST_DIR/server.key"
-launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL"
-"""
