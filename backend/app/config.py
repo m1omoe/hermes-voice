@@ -50,18 +50,25 @@ class Settings:
     auth_token: str = ""
     ssl_certfile: str = ""
     ssl_keyfile: str = ""
+    trusted_https_proxy: str = ""
+    forwarded_allow_ips: str = ""
+
+    @property
+    def direct_tls(self) -> bool:
+        return bool(self.ssl_certfile and self.ssl_keyfile)
+
+    @property
+    def serve_mode(self) -> bool:
+        return self.trusted_https_proxy == "tailscale-serve"
 
     @property
     def pairing_enabled(self) -> bool:
-        """True when the server is configured to accept pairing claims.
+        """True when HTTPS pairing may surrender the configured auth token."""
+        return bool(self.auth_token and (self.direct_tls or self.serve_mode))
 
-        All three of (a) a non-empty auth token to surrender, (b) TLS
-        certificate, and (c) TLS key must be present. Pairing is the
-        one route that bypasses the auth-token check, so it MUST be
-        guarded by a token requirement at startup — otherwise a plain
-        HTTP-only deployment could be tricked into giving the token to
-        any unauthenticated caller."""
-        return bool(self.auth_token and self.ssl_certfile and self.ssl_keyfile)
+    @property
+    def external_scheme(self) -> str:
+        return "https" if self.direct_tls or self.serve_mode else "http"
 
     # Bonjour/mDNS LAN advertisement (zero-config discovery by the iOS app).
     bonjour_enabled: bool = True
@@ -128,6 +135,8 @@ def get_settings() -> Settings:
         auth_token=_env("HERMES_VOICE_TOKEN"),
         ssl_certfile=_env("HERMES_VOICE_CERT"),
         ssl_keyfile=_env("HERMES_VOICE_KEY"),
+        trusted_https_proxy=_env("HERMES_VOICE_TRUSTED_HTTPS_PROXY"),
+        forwarded_allow_ips=_env("FORWARDED_ALLOW_IPS"),
         bonjour_enabled=_bool("HERMES_VOICE_BONJOUR", default=True),
         public_host=_env("HERMES_VOICE_PUBLIC_HOST"),
         hermes_bin=_env("HERMES_BIN", default="hermes"),

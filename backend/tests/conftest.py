@@ -76,8 +76,9 @@ class FakeTTS:
 def _clean_env(monkeypatch, tmp_path: Path):
     """Strip env so tests run deterministically regardless of host config."""
     for var in (
-        "HERMES_VOICE_MOCK", "HERMES_VOICE_TOKEN",
+        "HERMES_VOICE_MOCK", "HERMES_VOICE_HOST", "HERMES_VOICE_TOKEN",
         "HERMES_VOICE_CERT", "HERMES_VOICE_KEY",
+        "HERMES_VOICE_TRUSTED_HTTPS_PROXY", "FORWARDED_ALLOW_IPS",
         "OPENAI_API_KEY", "VOICE_TOOLS_OPENAI_KEY", "GROQ_API_KEY",
         "ELEVENLABS_API_KEY", "STT_PROVIDER", "TTS_PROVIDER",
         "PIPER_VOICE_PATH", "HERMES_EXTRA_ARGS",

@@ -89,10 +89,33 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def assert_safe_bind(settings: Settings) -> None:
-    """Fail closed before binding a socket: a non-loopback host with no auth
-    token would expose every endpoint to anyone on the LAN/tailnet. Called from
-    the server entrypoint (__main__), not app construction — TestClient builds
-    the app without binding, so it must stay exempt."""
+    """Fail closed unless bind and HTTPS proxy settings form a trusted mode."""
+    if settings.trusted_https_proxy not in {"", "tailscale-serve"}:
+        raise RuntimeError(
+            "refusing to start: unknown trusted HTTPS proxy "
+            f"{settings.trusted_https_proxy!r}"
+        )
+
+    if settings.serve_mode:
+        if settings.host != "127.0.0.1":
+            raise RuntimeError(
+                "refusing to start: Serve mode requires host='127.0.0.1'"
+            )
+        if settings.ssl_certfile or settings.ssl_keyfile:
+            raise RuntimeError(
+                "refusing to start: Serve mode cannot use a TLS certificate or key"
+            )
+        if settings.forwarded_allow_ips != "127.0.0.1":
+            raise RuntimeError(
+                "refusing to start: Serve mode requires "
+                "FORWARDED_ALLOW_IPS='127.0.0.1'"
+            )
+    elif settings.forwarded_allow_ips:
+        mode = "Direct TLS" if settings.direct_tls else "Plain HTTP"
+        raise RuntimeError(
+            f"refusing to start: {mode} cannot trust forwarded proxy headers"
+        )
+
     if not settings.auth_token and not _is_loopback_host(settings.host):
         raise RuntimeError(
             f"refusing to start: host={settings.host!r} is not loopback and "
@@ -108,6 +131,7 @@ def create_app(
     store: AudioStore | None = None,
 ) -> FastAPI:
     settings = get_settings()
+    assert_safe_bind(settings)
     auto_mock = settings.mock or _should_auto_mock(settings)
     injected_hermes = hermes is not None
 
@@ -154,7 +178,7 @@ def create_app(
         # headless / no-LAN host. `scheme` matches how __main__ launches uvicorn.
         mdns_state = None
         if settings.bonjour_enabled and not auto_mock:
-            scheme = "https" if (settings.ssl_certfile and settings.ssl_keyfile) else "http"
+            scheme = settings.external_scheme
             mdns_state = await mdns.start_mdns(
                 port=settings.port,
                 scheme=scheme,
@@ -621,9 +645,9 @@ def _register_routes(app: FastAPI) -> None:
         `_require_token` — the whole point of pairing is to deliver the
         token to a device that doesn't have it yet.
 
-        The route requires an actual HTTPS request plus
-        `settings.pairing_enabled` (auth_token + cert + key all present), so a
-        plain-HTTP deployment can never surrender the token. Every
+        The route requires an actual HTTPS request plus pairing enabled by a
+        configured auth token and trusted HTTPS mode, so a plain-HTTP deployment
+        can never surrender the token. Every
         unknown/expired/replayed/wrong-secret
         claim returns the SAME 404 body — leaking which case it is
         would help an attacker iterate."""
@@ -855,7 +879,6 @@ async def _run_turn(
 
     hermes: HarnessClient = harness or app.state.harnesses[app.state.default_harness]
     tts: TTSProvider | None = app.state.tts
-    store: AudioStore = app.state.store
     settings: Settings = app.state.settings
 
     turn_started_at = time.time() - 0.5  # small skew so we don't miss the first tool call
@@ -960,7 +983,9 @@ async def _stream_turn(
                     try:
                         # Speak the de-markdowned copy; the emitted assistant
                         # text above stays raw for the transcript.
-                        audio_url = _start_stream(app, tts, make_speakable(ev.text), voice_id=voice_id)
+                        audio_url = _start_stream(
+                            app, tts, make_speakable(ev.text), voice_id=voice_id
+                        )
                     except Exception as e:
                         logger.warning("stream tts setup error: %s", e)
                 if audio_url:

@@ -169,6 +169,66 @@ def configured_pairing_client(monkeypatch, tmp_path: Path):
         reset_settings_cache()
 
 
+@pytest.fixture
+def configured_serve_pairing_client(monkeypatch, tmp_path: Path):
+    """Build a validated Serve-mode client with an effective HTTPS scope."""
+    monkeypatch.setattr(pairing, "DEFAULT_DB_PATH", tmp_path / "pairings.db")
+    monkeypatch.setenv("HERMES_VOICE_TOKEN", "test-token")
+    monkeypatch.setenv("HERMES_VOICE_HOST", "127.0.0.1")
+    monkeypatch.setenv(
+        "HERMES_VOICE_TRUSTED_HTTPS_PROXY", "tailscale-serve"
+    )
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    reset_settings_cache()
+    try:
+        yield build_client(
+            hermes=FakeHermes(),
+            tts=None,
+            stt=None,
+            base_url="https://testserver",
+        )
+    finally:
+        reset_settings_cache()
+
+
+def test_serve_claim_returns_token_once_over_effective_https(
+    configured_serve_pairing_client,
+) -> None:
+    client = configured_serve_pairing_client
+    ticket = client.app.state.pairings.create()
+
+    first = client.post(
+        "/api/pairings/claim",
+        json={"pairing_id": ticket.pairing_id, "secret": ticket.secret},
+    )
+    assert first.status_code == 200
+    assert first.json() == {"token": "test-token"}
+
+    replay = client.post(
+        "/api/pairings/claim",
+        json={"pairing_id": ticket.pairing_id, "secret": ticket.secret},
+    )
+    assert replay.status_code == 404
+    assert replay.json() == {"detail": "pairing code unavailable"}
+
+
+def test_serve_claim_rejects_ordinary_http(
+    configured_serve_pairing_client,
+) -> None:
+    client = configured_serve_pairing_client
+    client.base_url = client.base_url.copy_with(scheme="http")
+    ticket = client.app.state.pairings.create()
+
+    response = client.post(
+        "/api/pairings/claim",
+        json={"pairing_id": ticket.pairing_id, "secret": ticket.secret},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "pairing code unavailable"}
+    assert "test-token" not in response.text
+
+
 def test_claim_endpoint_returns_token_once_over_https_transport(
     configured_pairing_client,
 ) -> None:
