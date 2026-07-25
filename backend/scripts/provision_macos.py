@@ -896,7 +896,7 @@ class MacProvisioner:
                     "runtime is incomplete; rerun setup or set both "
                     "HERMES_VOICE_CERT and HERMES_VOICE_KEY"
                 )
-        self._require_https_health(layout, token=token if not direct_tls else None)
+        self._require_https_health(layout, token=token)
         store = self.pairing_store or self._default_pairing_store()
         ticket = store.create(ttl_seconds=300)
         payload = self._pairing_payload(layout, ticket.pairing_id, ticket.secret)

@@ -1760,8 +1760,72 @@ def test_pair_succeeds_in_direct_tls_mode_without_serve_mapping(
 
     assert payload.startswith("harness-voice://pair?")
     assert store.creates == [300]
-    assert runner.harnesses_calls == 0
+    assert runner.harnesses_calls == 1
+    assert runner.harnesses_tokens == ["public-token"]
     assert runner.health_calls >= 1
+    assert not any(
+        call[0][1:] == ["serve", "status", "--json"] for call in runner.calls
+    )
+
+
+def test_pair_refuses_in_direct_tls_mode_when_public_health_reports_mock_true(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(
+        health_body={"status": "ok", "scheme": "https", "mock": True},
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        clock=clock,
+        sleeper=clock.sleep,
+        env={
+            "HERMES_VOICE_CERT": "/var/hv/cert.pem",
+            "HERMES_VOICE_KEY": "/var/hv/key.pem",
+        },
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 0
+    assert not any(
+        call[0][1:] == ["serve", "status", "--json"] for call in runner.calls
+    )
+
+
+def test_pair_refuses_in_direct_tls_mode_when_hermes_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(
+        harnesses_body=[{"id": "hermes", "name": "Hermes", "available": False}],
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        clock=clock,
+        sleeper=clock.sleep,
+        env={
+            "HERMES_VOICE_CERT": "/var/hv/cert.pem",
+            "HERMES_VOICE_KEY": "/var/hv/key.pem",
+        },
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 31
+    assert runner.harnesses_tokens == ["public-token"] * 31
     assert not any(
         call[0][1:] == ["serve", "status", "--json"] for call in runner.calls
     )
