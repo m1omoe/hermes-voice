@@ -874,7 +874,29 @@ class MacProvisioner:
             hermes_bin=self.env.get("HERMES_BIN") or "hermes",
         )
         self.layout = layout
-        self._require_https_health(layout)
+        if self.tailscale is None:
+            self.tailscale = self._find_tailscale()
+        token = self.keychain.get(KEYCHAIN_SERVICE)
+        if not token:
+            raise ProvisioningError(
+                "no server token in Keychain; run setup before pairing"
+            )
+        direct_tls = bool(
+            self.env.get("HERMES_VOICE_CERT") and self.env.get("HERMES_VOICE_KEY")
+        )
+        if not direct_tls:
+            state = self._serve_mapping_state(layout, self.tailscale)
+            if state.conflict is not None:
+                raise ProvisioningError(
+                    f"Tailscale Serve mapping conflict: {state.conflict}"
+                )
+            if not state.exact:
+                raise ProvisioningError(
+                    "Tailscale Serve mapping is absent and direct-TLS "
+                    "runtime is incomplete; rerun setup or set both "
+                    "HERMES_VOICE_CERT and HERMES_VOICE_KEY"
+                )
+        self._require_https_health(layout, token=token if not direct_tls else None)
         store = self.pairing_store or self._default_pairing_store()
         ticket = store.create(ttl_seconds=300)
         payload = self._pairing_payload(layout, ticket.pairing_id, ticket.secret)

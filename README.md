@@ -32,8 +32,10 @@ A turn is one round trip: iPhone records → POSTs audio → backend STT → `he
 
 From the app's **Set up a Mac server** screen, copy the versioned prompt into a
 local coding harness running on the target Mac. The prompt runs the first-party
-provisioner and pauses before Tailscale certificate requests and LaunchAgent
-installation. It never asks you to paste a token into the chat.
+provisioner and pauses before it configures a persistent tailnet-only HTTPS
+proxy (Tailscale Serve) and installs one backend LaunchAgent. It never asks
+you to paste a token into the chat, and it never generates or requests a
+certificate file.
 
 The provisioner supports these commands. Run them from the repository root—the
 checkout directory containing `backend/`:
@@ -44,34 +46,52 @@ uv run --project backend --extra provision python backend/scripts/provision_maco
 uv run --project backend --extra provision python backend/scripts/provision_macos.py pair
 ```
 
-`setup` discovers the checkout, `uv`, Tailscale, and MagicDNS name, generates
-user-specific launchd assets, stores the server token in the macOS Keychain, and
-checks the public HTTPS `/health` endpoint. `--from-bws` is an opt-in path for a
-registered Bitwarden Secrets Manager project; the managed token is passed to a
-child process through its environment only. `pair` shows a five-minute,
-one-time QR code after HTTPS is healthy. Scan it from the app; the long-lived
-server token is never encoded in the QR code.
+`setup` discovers the checkout, `uv`, Tailscale, and MagicDNS name; binds the
+backend to loopback; reuses or adds the exact Tailscale Serve HTTPS mapping to
+`127.0.0.1:8765`; stores the server token in the macOS Keychain; installs one
+`io.harnessvoice.backend` LaunchAgent; and checks the public HTTPS `/health`
+endpoint before reporting ready. It never calls `tailscale serve reset` and
+never touches an unrelated Serve mapping — a conflicting existing mapping on
+port 8765 stops setup before any local change. `--from-bws` is an opt-in path
+for a registered Bitwarden Secrets Manager project; the managed token is
+passed to a child process through its environment only. If any step after the
+mapping/LaunchAgent cutover fails (public health, authenticated harness
+check), setup automatically rolls back everything it changed and restores
+what was previously running; rerunning `setup` after fixing the underlying
+problem is always safe.
+
+`pair` shows a five-minute, one-time QR code, but only once every readiness
+gate passes: a server token already stored in Keychain, an exact
+non-conflicting Tailscale Serve mapping (or, for the advanced manual
+direct-TLS runtime, both `HERMES_VOICE_CERT` and `HERMES_VOICE_KEY` set), a
+public HTTPS `/health` that reports `mock: false`, and an authenticated
+`/api/harnesses` listing showing Hermes available. Scan the code from the
+app; the long-lived server token is never encoded in the QR code, and the
+pairing secret is never printed separately from the code itself.
 
 #### Troubleshooting guided setup
 
 Guided setup supports macOS with Tailscale only. Run it from a local coding
-harness on the target Mac and approve the certificate request and LaunchAgent
-installation when prompted. If setup stops after a prerequisite changes, rerun
-`setup`; to replace an expired or used code, rerun `pair`. If camera access is
+harness on the target Mac and approve the Serve/LaunchAgent configuration
+when prompted. If setup stops after a prerequisite changes, rerun `setup`; to
+replace an expired or used pairing code, rerun `pair`. If camera access is
 unavailable, keep using the app's manual URL/token or Bonjour paths.
 
-Non-secret diagnostics:
+Non-secret, non-destructive diagnostics:
 
 ```bash
+tailscale serve status --json
 launchctl print "gui/$(id -u)/io.harnessvoice.backend"
 tail -F "$HOME/Library/Logs/Harness Voice/backend.log"
 curl -s "https://$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(\".\")'):8765/health" | jq
 ```
 
-The health endpoint should report `status: ok` and `scheme: https`. Never print
-the Keychain token or paste credentials into a harness prompt, diagnostic
-command, issue, or chat. The copied app prompt contains only the public
-repository and provisioner command.
+`tailscale serve status --json` only reads Serve state — it never mutates
+anything and is always safe to run before or after `setup`/`pair`. The health
+endpoint should report `status: ok`, `scheme: https`, and `mock: false`.
+Never print the Keychain token or paste credentials into a harness prompt,
+diagnostic command, issue, or chat. The copied app prompt contains only the
+public repository and provisioner command.
 
 
 ### Advanced local development
@@ -142,10 +162,13 @@ You have three options, in order of preference:
 
 ## Auto-starting the backend
 
-The guided `setup` command generates portable, user-specific LaunchAgents under
-the current user's Library directories and starts them only after confirmation.
-It also generates a renewal agent for the detected Tailscale certificate. From
-the repository root—the checkout directory containing `backend/`—run:
+The guided `setup` command generates one portable, user-specific
+`io.harnessvoice.backend` LaunchAgent under the current user's Library
+directories and starts it only after confirmation. It binds the backend to
+loopback and reuses Tailscale Serve for the tailnet-facing HTTPS proxy; it
+never generates a certificate-renewal agent, because Tailscale Serve renews
+its own certificate transparently. From the repository root—the checkout
+directory containing `backend/`—run:
 
 ```bash
 uv run --project backend --extra provision python backend/scripts/provision_macos.py setup

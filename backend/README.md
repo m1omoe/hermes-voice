@@ -17,24 +17,41 @@ uv run --project backend --extra provision python backend/scripts/provision_maco
 ```
 
 The provisioner discovers the current checkout and Tailscale MagicDNS name,
-stores the token in Keychain, creates HTTPS LaunchAgents after confirmation, and
-renders a short-lived pairing QR only after `/health` reports HTTPS readiness.
-The checked-in `launchd/` files are non-operational deprecation stubs.
+binds the backend to loopback, reuses or adds the exact Tailscale Serve HTTPS
+mapping to `127.0.0.1:8765`, stores the token in Keychain, and installs one
+`io.harnessvoice.backend` LaunchAgent after confirmation. It never generates or
+requests a certificate file — Tailscale Serve owns TLS termination and
+renewal. The checked-in `launchd/` files are non-operational deprecation
+stubs.
 
-Setup is macOS + Tailscale only. A local harness may pause for certificate and
-LaunchAgent approval; rerun `setup` after resolving a prerequisite, or `pair`
-to issue another five-minute code. Manual URL/token and Bonjour remain
-available when camera pairing cannot be used.
+`pair` renders a short-lived pairing QR only after every readiness gate
+passes: a server token already in Keychain, an exact non-conflicting Serve
+mapping (or, for the advanced manual direct-TLS runtime, both
+`HERMES_VOICE_CERT` and `HERMES_VOICE_KEY` set), a public `/health` reporting
+`scheme: https` and `mock: false`, and an authenticated `/api/harnesses`
+listing showing Hermes available. The pairing secret exists only in memory
+and inside the QR payload — it is never printed separately.
+
+Setup is macOS + Tailscale only. A conflicting existing Serve mapping on port
+8765 stops setup before any local mutation; a failure after the mapping or
+LaunchAgent changes take effect (public health, authenticated harness check)
+rolls back everything setup changed and restores whatever was previously
+running. Rerun `setup` after resolving a prerequisite, or `pair` to issue
+another five-minute code. Manual URL/token and Bonjour remain available when
+camera pairing cannot be used.
 
 Inspect the service without exposing credentials:
 
 ```bash
+tailscale serve status --json
 launchctl print "gui/$(id -u)/io.harnessvoice.backend"
 tail -F "$HOME/Library/Logs/Harness Voice/backend.log"
 curl -s "https://$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(\".\")'):8765/health" | jq
 ```
 
-Do not retrieve or print the Keychain token for diagnostics.
+`tailscale serve status --json` only reads Serve state; it is always
+non-destructive to run. Do not retrieve or print the Keychain token for
+diagnostics.
 
 
 ## Advanced local development
@@ -48,6 +65,11 @@ uv run pytest -q                  # run tests (env-isolated per test)
 
 `backend/.env` is for advanced local development only; the guided provisioner
 never reads or writes it. Shell env vars still win over `.env` when both are set.
+
+Direct-TLS is still supported as a manual runtime configuration: set both
+`HERMES_VOICE_CERT` and `HERMES_VOICE_KEY` to an existing certificate/key pair
+and Uvicorn terminates TLS itself. The guided provisioner never manages a
+certificate for this path — bring your own and renew it yourself.
 
 ## Endpoints
 

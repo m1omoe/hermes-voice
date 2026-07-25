@@ -4,7 +4,10 @@
 <plist version="1.0">
 <dict>
     <!-- DEPRECATED: this checked-in asset is intentionally non-operational.
-         Run the guided provisioner instead:
+         Do not copy it into ~/Library/LaunchAgents/. Run the guided
+         provisioner instead; it binds the backend to loopback and reuses
+         Tailscale Serve for the tailnet-facing HTTPS proxy — no certificate
+         file is generated or requested:
          uv run --project backend --extra provision python
            backend/scripts/provision_macos.py setup -->
     <key>Label</key>

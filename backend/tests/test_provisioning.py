@@ -1380,7 +1380,11 @@ def test_pair_refuses_after_bounded_health_deadline(tmp_path: Path) -> None:
     runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
     clock = FakeClock()
     provisioner, _, _ = make_provisioner(
-        tmp_path, runner, clock=clock, sleeper=clock.sleep
+        tmp_path,
+        runner,
+        clock=clock,
+        sleeper=clock.sleep,
+        existing_token="public-token",
     )
 
     with pytest.raises(ProvisioningError, match="HTTPS"):
@@ -1587,7 +1591,11 @@ def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
     runner = FakeRunner(health_body={"status": "ok", "scheme": "http"})
     clock = FakeClock()
     provisioner, _, _ = make_provisioner(
-        tmp_path, runner, clock=clock, sleeper=clock.sleep
+        tmp_path,
+        runner,
+        clock=clock,
+        sleeper=clock.sleep,
+        existing_token="public-token",
     )
 
     with pytest.raises(ProvisioningError, match="HTTPS"):
@@ -1607,7 +1615,9 @@ def test_pair_prints_only_instruction_expiry_and_qr(tmp_path: Path, capsys) -> N
                 expires_at=1_800_000_000.0,
             )
 
-    provisioner, _, _ = make_provisioner(tmp_path, FakeRunner())
+    provisioner, _, _ = make_provisioner(
+        tmp_path, FakeRunner(), existing_token="public-token"
+    )
     provisioner.pairing_store = FakePairingStore()
 
     payload = provisioner.create_pairing_qr()
@@ -1618,3 +1628,237 @@ def test_pair_prints_only_instruction_expiry_and_qr(tmp_path: Path, capsys) -> N
     assert "Pairing code expires at" in output
     assert secret not in output
     assert secret in payload
+
+
+class CountingPairingStore:
+    def __init__(self) -> None:
+        self.creates: list[int] = []
+
+    def create(self, *, ttl_seconds: int) -> SimpleNamespace:
+        assert ttl_seconds == 300
+        self.creates.append(ttl_seconds)
+        return SimpleNamespace(
+            pairing_id="pairing-id",
+            secret=f"pairing-secret-{len(self.creates)}",
+            expires_at=1_800_000_000.0,
+        )
+
+
+def test_pair_refuses_when_keychain_token_is_missing(tmp_path: Path) -> None:
+    runner = FakeRunner(serve_statuses=[EXACT_SERVE_STATUS])
+    provisioner, keychain, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token=None,
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="Keychain"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 0
+    assert keychain.saved == []
+    assert keychain.existing_token is None
+
+
+def test_pair_refuses_when_serve_mapping_is_conflicting(tmp_path: Path) -> None:
+    runner = FakeRunner(serve_statuses=[WRONG_PROXY_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="Serve mapping conflict"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 0
+    assert runner.health_calls == 0
+
+
+def test_pair_refuses_when_serve_mapping_is_absent_without_direct_tls(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(serve_statuses=[ABSENT_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="direct-TLS"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 0
+    assert runner.health_calls == 0
+
+
+def test_pair_refuses_when_serve_mapping_is_absent_and_only_cert_is_set(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(serve_statuses=[ABSENT_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        env={"HERMES_VOICE_CERT": "/var/hv/cert.pem"},
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="direct-TLS"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+
+
+def test_pair_refuses_when_serve_mapping_is_absent_and_only_key_is_set(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(serve_statuses=[ABSENT_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        env={"HERMES_VOICE_KEY": "/var/hv/key.pem"},
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="direct-TLS"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+
+
+def test_pair_succeeds_in_direct_tls_mode_without_serve_mapping(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("qrcode")
+    runner = FakeRunner()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        env={
+            "HERMES_VOICE_CERT": "/var/hv/cert.pem",
+            "HERMES_VOICE_KEY": "/var/hv/key.pem",
+        },
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    payload = provisioner.create_pairing_qr()
+
+    assert payload.startswith("harness-voice://pair?")
+    assert store.creates == [300]
+    assert runner.harnesses_calls == 0
+    assert runner.health_calls >= 1
+    assert not any(
+        call[0][1:] == ["serve", "status", "--json"] for call in runner.calls
+    )
+
+
+def test_pair_succeeds_in_serve_mode_with_token_health_and_hermes(
+    tmp_path: Path, capsys
+) -> None:
+    pytest.importorskip("qrcode")
+    runner = FakeRunner(serve_statuses=[EXACT_SERVE_STATUS])
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    payload = provisioner.create_pairing_qr()
+    output = capsys.readouterr().out
+
+    assert payload.startswith("harness-voice://pair?")
+    assert store.creates == [300]
+    assert runner.harnesses_calls == 1
+    assert runner.harnesses_tokens == ["public-token"]
+    assert runner.health_calls >= 1
+    assert "pairing-secret-1" not in output
+    assert "public-token" not in output
+
+
+def test_pair_refuses_when_public_health_reports_non_https(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        serve_statuses=[EXACT_SERVE_STATUS],
+        health_body={"status": "ok", "scheme": "http", "mock": False},
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="HTTPS"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+
+
+def test_pair_refuses_when_public_health_reports_mock_true(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        serve_statuses=[EXACT_SERVE_STATUS],
+        health_body={"status": "ok", "scheme": "https", "mock": True},
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 0
+
+
+def test_pair_refuses_when_authenticated_hermes_listing_has_no_hermes(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(
+        serve_statuses=[EXACT_SERVE_STATUS],
+        harnesses_body=[{"id": "other", "name": "Other", "available": True}],
+    )
+    clock = FakeClock()
+    provisioner, _, _ = make_provisioner(
+        tmp_path,
+        runner,
+        existing_token="public-token",
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+    store = CountingPairingStore()
+    provisioner.pairing_store = store
+
+    with pytest.raises(ProvisioningError, match="real Hermes"):
+        provisioner.create_pairing_qr()
+
+    assert store.creates == []
+    assert runner.harnesses_calls == 31
+    assert runner.harnesses_tokens == ["public-token"] * 31
+
