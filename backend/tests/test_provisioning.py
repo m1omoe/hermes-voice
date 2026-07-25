@@ -560,6 +560,8 @@ class MigrationRunner(FakeRunner):
         self.fail_at = set(fail_at or ())
         self.enforce_port_collision = enforce_port_collision
         self.serve_status_calls = 0
+        self.keychain: FakeKeychain | None = None
+        self.bootstrap_tokens: list[tuple[str, str | None]] = []
 
     @staticmethod
     def _label(service: str) -> str:
@@ -655,6 +657,10 @@ class MigrationRunner(FakeRunner):
         if args[:2] == ["launchctl", "bootstrap"]:
             self._record_call(args, env, input, capture_output)
             label = Path(args[-1]).stem
+            if self.keychain is not None:
+                self.bootstrap_tokens.append(
+                    (label, self.keychain.existing_token)
+                )
             if (
                 label == "io.harnessvoice.backend"
                 and self.enforce_port_collision
@@ -772,6 +778,7 @@ def make_migration_provisioner(
         events=events,
         fail_set=keychain_fail_set,
     )
+    runner.keychain = keychain
     clock = FakeClock()
     provisioner = MacProvisioner(
         layout=layout,
@@ -914,6 +921,9 @@ def test_migration_rollback_restores_every_precommit_boundary(
     if existing_token is None and failure not in {
         "wrapper validation",
         "plist validation",
+        "Serve add",
+        "Serve recheck",
+        "old bootout",
     }:
         assert keychain.deleted == ["HERMES_VOICE_TOKEN"], failure
     assert runner.loaded_labels == {
@@ -928,6 +938,28 @@ def test_migration_rollback_restores_every_precommit_boundary(
         and call[0][-1] == "off"
     ]
     assert bool(serve_off_calls) is not serve_exact, failure
+
+
+def test_migration_rollback_restores_token_before_restarting_legacy(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, keychain, _, events, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token-never-report",
+        runner_fail_at={"public_health"},
+    )
+
+    with pytest.raises(ProvisioningError, match="public HTTPS health"):
+        provisioner.setup(from_bws_child=True)
+
+    assert runner.bootstrap_tokens == [
+        ("io.harnessvoice.backend", "replacement-token-never-report"),
+        (provision_macos.LEGACY_BACKEND_LABEL, "old-token-never-report"),
+    ]
+    assert events.index("keychain:set") < events.index(
+        f"launchctl:bootstrap:{provision_macos.LEGACY_BACKEND_LABEL}"
+    )
+    assert keychain.existing_token == "old-token-never-report"
 
 
 def test_migration_rollback_error_reports_original_and_rollback_boundaries(

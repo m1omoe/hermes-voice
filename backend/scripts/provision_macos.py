@@ -509,15 +509,6 @@ class _DeploymentTransaction:
         self._secrets.append(token)
         try:
             self._stage_and_validate()
-            if self.replace_token or snapshot.token is None:
-                self._register(
-                    "Keychain restoration",
-                    lambda: self._restore_token(snapshot.token),
-                )
-                self._boundary(
-                    "Keychain update",
-                    lambda: self.provisioner.keychain.set(KEYCHAIN_SERVICE, token),
-                )
 
             mapping_added = self.provisioner._require_serve_mapping(
                 self.layout, self.tailscale
@@ -545,6 +536,16 @@ class _DeploymentTransaction:
                 self.provisioner._bootout_agent(
                     label, f"existing {label} LaunchAgent shutdown"
                 )
+            if self.replace_token or snapshot.token is None:
+                self._register(
+                    "Keychain restoration",
+                    lambda: self._restore_token(snapshot.token),
+                )
+                self._boundary(
+                    "Keychain update",
+                    lambda: self.provisioner.keychain.set(KEYCHAIN_SERVICE, token),
+                )
+
 
             self._install_asset(snapshot.file(self.wrapper), self.staged_wrapper)
             self._install_asset(
