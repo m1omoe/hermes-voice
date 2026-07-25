@@ -97,6 +97,11 @@ def assert_safe_bind(settings: Settings) -> None:
         )
 
     if settings.serve_mode:
+        if not settings.auth_token:
+            raise RuntimeError(
+                "refusing to start: Serve mode requires a non-empty "
+                "HERMES_VOICE_TOKEN"
+            )
         if settings.host != "127.0.0.1":
             raise RuntimeError(
                 "refusing to start: Serve mode requires host='127.0.0.1'"

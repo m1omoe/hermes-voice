@@ -120,6 +120,30 @@ def test_validate_runtime_settings_rejects_invalid_serve_mode(overrides):
         assert_safe_bind(Settings(**values))
 
 
+def test_validate_runtime_settings_rejects_serve_mode_without_token():
+    with pytest.raises(RuntimeError, match="Serve mode requires a non-empty"):
+        assert_safe_bind(
+            Settings(
+                host="127.0.0.1",
+                trusted_https_proxy="tailscale-serve",
+                forwarded_allow_ips="127.0.0.1",
+            )
+        )
+
+
+def test_create_app_rejects_serve_mode_without_token(monkeypatch):
+    monkeypatch.setenv("HERMES_VOICE_HOST", "127.0.0.1")
+    monkeypatch.setenv(
+        "HERMES_VOICE_TRUSTED_HTTPS_PROXY", "tailscale-serve"
+    )
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    from app.config import reset_settings_cache
+
+    reset_settings_cache()
+    with pytest.raises(RuntimeError, match="Serve mode requires a non-empty"):
+        build_client(hermes=FakeHermes(), stt=None, tts=None)
+
+
 def test_validate_runtime_settings_rejects_unknown_proxy_mode():
     with pytest.raises(RuntimeError, match="trusted HTTPS proxy"):
         assert_safe_bind(
