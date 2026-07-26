@@ -32,6 +32,8 @@ KEYCHAIN_SERVICE = "HERMES_VOICE_TOKEN"
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT = 30.0
 HEALTH_INTERVAL = 1.0
+LAUNCHCTL_BOOTSTRAP_RETRY_TIMEOUT = 5.0
+LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL = 0.25
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"
 RENEWAL_LABEL = "io.harnessvoice.cert-renew"
@@ -990,12 +992,24 @@ class MacProvisioner:
 
     def _bootstrap_agent(self, label: str, plist: Path) -> None:
         uid = f"gui/{self.user_id}"
+        service = f"{uid}/{label}"
+        bootstrap = ["launchctl", "bootstrap", uid, str(plist)]
+        action = f"{label} LaunchAgent bootstrap"
+        deadline = self.clock() + LAUNCHCTL_BOOTSTRAP_RETRY_TIMEOUT
+        while True:
+            result = self.runner.run(bootstrap)
+            if result.returncode == 0:
+                break
+            if self.runner.run(["launchctl", "print", service]).returncode == 0:
+                raise ProvisioningError(f"{action} failed")
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise ProvisioningError(f"{action} failed")
+            self.sleeper(
+                min(LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL, remaining)
+            )
         self._run_checked(
-            ["launchctl", "bootstrap", uid, str(plist)],
-            f"{label} LaunchAgent bootstrap",
-        )
-        self._run_checked(
-            ["launchctl", "kickstart", "-k", f"{uid}/{label}"],
+            ["launchctl", "kickstart", "-k", service],
             f"{label} LaunchAgent start",
         )
 

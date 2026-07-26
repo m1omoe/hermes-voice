@@ -663,6 +663,15 @@ class MigrationRunner(FakeRunner):
                 self.bootstrap_tokens.append(
                     (label, self.keychain.existing_token)
                 )
+            boundary = (
+                "neutral_bootstrap"
+                if label == "io.harnessvoice.backend"
+                else "rollback_restart"
+            )
+            if self._fail_once(f"{boundary}_transient"):
+                return CommandResult(1, "", f"injected transient {boundary} failure")
+            if f"{boundary}_permanent" in self.fail_at:
+                return CommandResult(1, "", f"injected permanent {boundary} failure")
             if (
                 label == "io.harnessvoice.backend"
                 and self.enforce_port_collision
@@ -671,11 +680,6 @@ class MigrationRunner(FakeRunner):
                 return CommandResult(1, "", "legacy backend still owns the live port")
             self.loaded_labels.add(label)
             self.events.append(f"launchctl:bootstrap:{label}")
-            boundary = (
-                "neutral_bootstrap"
-                if label == "io.harnessvoice.backend"
-                else "rollback_restart"
-            )
             return CommandResult(
                 1 if self._fail_once(boundary) else 0,
                 "",
@@ -876,6 +880,101 @@ def test_cutover_stops_legacy_backend_before_neutral_live_port_start(
     ) < events.index("launchctl:bootstrap:io.harnessvoice.backend")
 
 
+def test_bootstrap_retry_recovers_immediate_neutral_rerun_race(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, _, _, _, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+        runner_fail_at={"neutral_bootstrap_transient"},
+    )
+    runner.loaded_labels = {
+        "io.harnessvoice.backend",
+        "io.harnessvoice.cert-renew",
+    }
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+
+    provisioner.setup(from_bws_child=True)
+
+    bootstrap_calls = [
+        call[0]
+        for call in runner.calls
+        if call[0][:2] == ["launchctl", "bootstrap"]
+        and Path(call[0][-1]).stem == "io.harnessvoice.backend"
+    ]
+    assert len(bootstrap_calls) == 2
+    assert clock.sleeps == [
+        provision_macos.LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL
+    ]
+    assert runner.loaded_labels == {"io.harnessvoice.backend"}
+
+
+def test_bootstrap_retry_recovers_rollback_restart_race(tmp_path: Path) -> None:
+    provisioner, runner, _, _, _, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+        runner_fail_at={"public_health", "rollback_restart_transient"},
+    )
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+
+    with pytest.raises(ProvisioningError) as error:
+        provisioner.setup(from_bws_child=True)
+
+    legacy_bootstraps = [
+        call[0]
+        for call in runner.calls
+        if call[0][:2] == ["launchctl", "bootstrap"]
+        and Path(call[0][-1]).stem == provision_macos.LEGACY_BACKEND_LABEL
+    ]
+    assert len(legacy_bootstraps) == 2
+    assert clock.sleeps[-1] == (
+        provision_macos.LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL
+    )
+    assert "rollback failed" not in str(error.value)
+    assert runner.loaded_labels == {
+        provision_macos.LEGACY_BACKEND_LABEL,
+        "io.harnessvoice.cert-renew",
+    }
+
+
+def test_bootstrap_retry_permanent_failure_is_bounded_and_loud(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, _, _, _, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+        runner_fail_at={"neutral_bootstrap_permanent"},
+    )
+    runner.loaded_labels = set()
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+    plist = migration_asset_paths(make_layout(tmp_path))["backend_plist"]
+
+    with pytest.raises(
+        ProvisioningError,
+        match=r"io\.harnessvoice\.backend LaunchAgent bootstrap failed",
+    ):
+        provisioner._bootstrap_agent("io.harnessvoice.backend", plist)
+
+    bootstrap_calls = [
+        call[0]
+        for call in runner.calls
+        if call[0][:2] == ["launchctl", "bootstrap"]
+    ]
+    assert len(bootstrap_calls) > 1
+    assert clock.now == provision_macos.LAUNCHCTL_BOOTSTRAP_RETRY_TIMEOUT
+    assert not any(
+        call[0][:2] == ["launchctl", "kickstart"]
+        for call in runner.calls
+    )
+    assert runner.loaded_labels == set()
+
+
 @pytest.mark.parametrize(
     ("failure", "runner_failures", "writer_failure", "keychain_failure", "serve_exact"),
     [
@@ -887,7 +986,13 @@ def test_cutover_stops_legacy_backend_before_neutral_live_port_start(
         ("old bootout", {"old_bootout"}, None, False, True),
         ("wrapper replace", set(), "wrapper_replace", False, True),
         ("plist replace", set(), "plist_replace", False, True),
-        ("neutral bootstrap", {"neutral_bootstrap"}, None, False, True),
+        (
+            "neutral bootstrap",
+            {"neutral_bootstrap_permanent"},
+            None,
+            False,
+            True,
+        ),
         ("neutral kickstart", {"neutral_kickstart"}, None, False, True),
         ("public health", {"public_health"}, None, False, True),
         ("harness listing", {"harness_listing"}, None, False, True),
@@ -970,7 +1075,7 @@ def test_migration_rollback_error_reports_original_and_rollback_boundaries(
     provisioner, _, _, _, _, _ = make_migration_provisioner(
         tmp_path,
         existing_token="old-token-never-report",
-        runner_fail_at={"public_health", "rollback_restart"},
+        runner_fail_at={"public_health", "rollback_restart_permanent"},
     )
 
     with pytest.raises(ProvisioningError) as error:
