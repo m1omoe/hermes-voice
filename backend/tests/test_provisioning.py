@@ -362,6 +362,8 @@ class FakeRunner:
             if not self.serve_statuses:
                 raise AssertionError("unexpected extra Tailscale Serve status check")
             return CommandResult(0, self.serve_statuses.pop(0), "")
+        if args[:2] == ["launchctl", "print"]:
+            return CommandResult(1, "", "")
         if args[:2] == ["bws-project", "run"]:
             if self.bws_missing:
                 raise FileNotFoundError("bws-project")
@@ -575,6 +577,9 @@ class MigrationRunner(FakeRunner):
         self.serve_status_calls = 0
         self.keychain: FakeKeychain | None = None
         self.bootstrap_tokens: list[tuple[str, str | None]] = []
+        self.bootout_poll_delays: dict[str, int] = {}
+        self.bootout_never_absent: set[str] = set()
+        self.pending_bootouts: dict[str, int] = {}
 
     @staticmethod
     def _label(service: str) -> str:
@@ -644,12 +649,26 @@ class MigrationRunner(FakeRunner):
         if args[:2] == ["launchctl", "print"]:
             self._record_call(args, env, input, capture_output)
             label = self._label(args[-1])
-            self.events.append(f"launchctl:print:{label}")
-            return CommandResult(0 if label in self.loaded_labels else 1, "", "")
+            if label in self.pending_bootouts:
+                remaining = self.pending_bootouts[label]
+                if remaining == 0:
+                    self.pending_bootouts.pop(label)
+                    self.loaded_labels.discard(label)
+                else:
+                    self.pending_bootouts[label] = remaining - 1
+            loaded = label in self.loaded_labels
+            state = "loaded" if loaded else "absent"
+            self.events.append(f"launchctl:print:{label}:{state}")
+            return CommandResult(0 if loaded else 1, "", "")
         if args[:2] == ["launchctl", "bootout"]:
             self._record_call(args, env, input, capture_output)
             label = self._label(args[-1])
-            self.loaded_labels.discard(label)
+            if label in self.bootout_never_absent:
+                pass
+            elif label in self.bootout_poll_delays:
+                self.pending_bootouts[label] = self.bootout_poll_delays[label]
+            else:
+                self.loaded_labels.discard(label)
             self.events.append(f"launchctl:bootout:{label}")
             boundary = (
                 "renewal_bootout"
@@ -890,6 +909,77 @@ def test_cutover_stops_legacy_backend_before_neutral_live_port_start(
     assert events.index(
         f"launchctl:bootout:{provision_macos.LEGACY_BACKEND_LABEL}"
     ) < events.index("launchctl:bootstrap:io.harnessvoice.backend")
+
+
+def test_bootout_waits_for_absence_before_asset_replace_and_bootstrap(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, _, _, events, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+    )
+    neutral = "io.harnessvoice.backend"
+    runner.loaded_labels = {neutral, "io.harnessvoice.cert-renew"}
+    runner.bootout_poll_delays[neutral] = 2
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+
+    provisioner.setup()
+
+    bootout = events.index(f"launchctl:bootout:{neutral}")
+    loaded_polls = [
+        index
+        for index, event in enumerate(events)
+        if event == f"launchctl:print:{neutral}:loaded" and index > bootout
+    ]
+    absent = events.index(f"launchctl:print:{neutral}:absent", bootout)
+    replace = events.index("replace:run-backend")
+    bootstrap = events.index(f"launchctl:bootstrap:{neutral}")
+    assert len(loaded_polls) == 2
+    assert bootout < loaded_polls[0] < loaded_polls[1] < absent
+    assert absent < replace < bootstrap
+    assert clock.sleeps == [
+        provision_macos.LAUNCHCTL_BOOTOUT_POLL_INTERVAL
+    ] * 2
+    assert runner.loaded_labels == {neutral}
+
+
+def test_bootout_still_loaded_failure_is_bounded_and_loud(
+    tmp_path: Path,
+) -> None:
+    max_checks = provision_macos.LAUNCHCTL_BOOTOUT_MAX_CHECKS
+    provisioner, runner, _, _, _, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+    )
+    neutral = "io.harnessvoice.backend"
+    runner.loaded_labels = {neutral}
+    runner.bootout_never_absent.add(neutral)
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+
+    with pytest.raises(
+        ProvisioningError,
+        match="existing backend shutdown incomplete",
+    ):
+        provisioner._bootout_agent(
+            neutral, "existing backend shutdown"
+        )
+
+    assert sum(
+        call[0][:2] == ["launchctl", "bootout"]
+        for call in runner.calls
+    ) == 1
+    assert sum(
+        call[0][:2] == ["launchctl", "print"]
+        for call in runner.calls
+    ) == max_checks
+    assert clock.sleeps == [
+        provision_macos.LAUNCHCTL_BOOTOUT_POLL_INTERVAL
+    ] * (max_checks - 1)
+    assert runner.loaded_labels == {neutral}
 
 
 def test_migration_stages_plist_outside_watched_launchagents_on_rerun(

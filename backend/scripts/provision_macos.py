@@ -32,6 +32,8 @@ KEYCHAIN_SERVICE = "HERMES_VOICE_TOKEN"
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT = 30.0
 HEALTH_INTERVAL = 1.0
+LAUNCHCTL_BOOTOUT_MAX_CHECKS = 21
+LAUNCHCTL_BOOTOUT_POLL_INTERVAL = 0.25
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"
 RENEWAL_LABEL = "io.harnessvoice.cert-renew"
@@ -1007,6 +1009,12 @@ class MacProvisioner:
     def _bootout_agent(self, label: str, action: str) -> None:
         service = f"gui/{self.user_id}/{label}"
         self._run_checked(["launchctl", "bootout", service], action)
+        for check in range(LAUNCHCTL_BOOTOUT_MAX_CHECKS):
+            if self.runner.run(["launchctl", "print", service]).returncode != 0:
+                return
+            if check + 1 == LAUNCHCTL_BOOTOUT_MAX_CHECKS:
+                raise ProvisioningError(f"{action} incomplete")
+            self.sleeper(LAUNCHCTL_BOOTOUT_POLL_INTERVAL)
 
     def _bootout_agent_if_loaded(self, label: str) -> None:
         if self._agent_loaded(label):
