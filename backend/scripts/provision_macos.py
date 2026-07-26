@@ -508,7 +508,9 @@ class _DeploymentTransaction:
         self.requested_token = requested_token
         self.replace_token = replace_token
         self.committed = False
-        self._rollback_actions: list[tuple[str, Callable[[], None]]] = []
+        self._rollback_actions: list[
+            tuple[str, Callable[[], None], bool]
+        ] = []
         nonce = f"{os.getpid()}-{secrets.token_hex(4)}"
         self.wrapper = layout.support_dir / "run-backend"
         launch_agents = layout.home / "Library/LaunchAgents"
@@ -554,14 +556,14 @@ class _DeploymentTransaction:
                     if label == self.layout.backend_label
                     else self.legacy_plist
                 )
+                self.provisioner._bootout_agent(
+                    label, f"existing {label} LaunchAgent shutdown"
+                )
                 self._register(
                     f"{label} restart",
                     lambda label=label, plist=plist: self.provisioner._bootstrap_agent(
                         label, plist
                     ),
-                )
-                self.provisioner._bootout_agent(
-                    label, f"existing {label} LaunchAgent shutdown"
                 )
             if self.replace_token or snapshot.token is None:
                 self._register(
@@ -586,6 +588,7 @@ class _DeploymentTransaction:
                 lambda: self.provisioner._bootout_agent_if_loaded(
                     self.layout.backend_label
                 ),
+                halt_on_failure=True,
             )
             self.provisioner._bootstrap_agent(
                 self.layout.backend_label, self.backend_plist
@@ -766,8 +769,14 @@ class _DeploymentTransaction:
             failures.append("legacy asset removal")
         return failures
 
-    def _register(self, boundary: str, action: Callable[[], None]) -> None:
-        self._rollback_actions.append((boundary, action))
+    def _register(
+        self,
+        boundary: str,
+        action: Callable[[], None],
+        *,
+        halt_on_failure: bool = False,
+    ) -> None:
+        self._rollback_actions.append((boundary, action, halt_on_failure))
 
     def _boundary(self, boundary: str, action: Callable[[], None]) -> None:
         try:
@@ -777,11 +786,13 @@ class _DeploymentTransaction:
 
     def _raise_precommit_failure(self, original: Exception) -> None:
         failures: list[str] = []
-        for boundary, action in reversed(self._rollback_actions):
+        for boundary, action, halt_on_failure in reversed(self._rollback_actions):
             try:
                 action()
             except Exception:
                 failures.append(boundary)
+                if halt_on_failure:
+                    break
         message = (
             "deployment failed before commit: "
             + self._redact(str(original) or type(original).__name__)

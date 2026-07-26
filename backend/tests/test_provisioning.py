@@ -663,13 +663,6 @@ class MigrationRunner(FakeRunner):
         if args[:2] == ["launchctl", "bootout"]:
             self._record_call(args, env, input, capture_output)
             label = self._label(args[-1])
-            if label in self.bootout_never_absent:
-                pass
-            elif label in self.bootout_poll_delays:
-                self.pending_bootouts[label] = self.bootout_poll_delays[label]
-            else:
-                self.loaded_labels.discard(label)
-            self.events.append(f"launchctl:bootout:{label}")
             boundary = (
                 "renewal_bootout"
                 if label == "io.harnessvoice.cert-renew"
@@ -681,11 +674,16 @@ class MigrationRunner(FakeRunner):
                 and "harness_listing" not in self.fail_at
                 else "old_bootout"
             )
-            return CommandResult(
-                1 if self._fail_once(boundary) else 0,
-                "",
-                f"injected {boundary} failure",
-            )
+            self.events.append(f"launchctl:bootout:{label}")
+            if self._fail_once(boundary):
+                return CommandResult(1, "", f"injected {boundary} failure")
+            if label in self.bootout_never_absent:
+                pass
+            elif label in self.bootout_poll_delays:
+                self.pending_bootouts[label] = self.bootout_poll_delays[label]
+            else:
+                self.loaded_labels.discard(label)
+            return CommandResult(0, "", "")
         if args[:2] == ["launchctl", "bootstrap"]:
             self._record_call(args, env, input, capture_output)
             label = Path(args[-1]).stem
@@ -980,6 +978,77 @@ def test_bootout_still_loaded_failure_is_bounded_and_loud(
         provision_macos.LAUNCHCTL_BOOTOUT_POLL_INTERVAL
     ] * (max_checks - 1)
     assert runner.loaded_labels == {neutral}
+
+
+def test_transaction_stops_before_replace_when_prior_bootout_never_absent(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, keychain, writer, events, original_assets = (
+        make_migration_provisioner(
+            tmp_path,
+            existing_token="old-token",
+        )
+    )
+    neutral = "io.harnessvoice.backend"
+    runner.loaded_labels = {neutral, "io.harnessvoice.cert-renew"}
+    runner.bootout_never_absent.add(neutral)
+
+    with pytest.raises(ProvisioningError, match="shutdown incomplete"):
+        provisioner.setup()
+
+    assert not any(event.startswith("replace:") for event in events)
+    assert not any(
+        call[0][:2] == ["launchctl", "bootstrap"]
+        for call in runner.calls
+    )
+    assert writer.text == original_assets
+    assert keychain.existing_token == "old-token"
+    assert runner.loaded_labels == {
+        neutral,
+        "io.harnessvoice.cert-renew",
+    }
+
+
+def test_critical_rollback_removal_failure_halts_state_restoration(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, keychain, writer, _, original_assets = (
+        make_migration_provisioner(
+            tmp_path,
+            existing_token="old-token-never-report",
+            serve_exact=False,
+            runner_fail_at={"public_health"},
+        )
+    )
+    neutral = "io.harnessvoice.backend"
+    runner.bootout_never_absent.add(neutral)
+
+    with pytest.raises(ProvisioningError) as error:
+        provisioner.setup(from_bws_child=True)
+
+    message = str(error.value)
+    assert "public HTTPS health" in message
+    assert "rollback failed at new neutral LaunchAgent removal" in message
+    assert not any(".rollback-" in path.name for path in writer.writes)
+    paths = migration_asset_paths(make_layout(tmp_path))
+    assert writer.text[paths["wrapper"]] != original_assets[paths["wrapper"]]
+    assert writer.text[paths["backend_plist"]] != original_assets[
+        paths["backend_plist"]
+    ]
+    assert keychain.existing_token == "replacement-token-never-report"
+    assert runner.bootstrap_tokens == [
+        (neutral, "replacement-token-never-report")
+    ]
+    assert runner.serve_exact is True
+    assert not any(
+        call[0][1:3] == ["serve", "--https=8765"]
+        and call[0][-1] == "off"
+        for call in runner.calls
+    )
+    assert runner.loaded_labels == {
+        neutral,
+        "io.harnessvoice.cert-renew",
+    }
 
 
 def test_migration_stages_plist_outside_watched_launchagents_on_rerun(
