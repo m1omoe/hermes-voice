@@ -438,12 +438,15 @@ class FakeWriter:
         *,
         events: list[str] | None = None,
         fail_at: str | None = None,
+        same_device: bool = True,
     ) -> None:
         self.text: dict[Path, str] = {}
         self.copies: list[tuple[Path, Path]] = []
         self.modes: list[tuple[Path, int]] = []
         self.path_modes: dict[Path, int] = {}
         self.writes: list[Path] = []
+        self.same_device = same_device
+        self.device_checks: list[tuple[Path, Path]] = []
         self.events = events
         self.fail_at = fail_at
 
@@ -455,6 +458,12 @@ class FakeWriter:
         if self.fail_at == boundary:
             self.fail_at = None
             raise OSError(f"injected {boundary} failure")
+
+    def same_filesystem(self, first: Path, second: Path) -> bool:
+        self.device_checks.append((first, second))
+        self._record("filesystem:check")
+        return self.same_device
+
 
     def write_text(self, path: Path, content: str, *, mode: int | None = None) -> None:
         self.text[path] = content
@@ -746,6 +755,7 @@ def make_migration_provisioner(
     writer_fail_at: str | None = None,
     keychain_fail_set: bool = False,
     enforce_port_collision: bool = False,
+    same_device: bool = True,
 ) -> tuple[
     MacProvisioner,
     MigrationRunner,
@@ -767,7 +777,11 @@ def make_migration_provisioner(
         fail_at=runner_fail_at,
         enforce_port_collision=enforce_port_collision,
     )
-    writer = FakeWriter(events=events, fail_at=writer_fail_at)
+    writer = FakeWriter(
+        events=events,
+        fail_at=writer_fail_at,
+        same_device=same_device,
+    )
     paths = migration_asset_paths(layout)
     original_assets = {
         paths["wrapper"]: "old wrapper\n",
@@ -902,6 +916,63 @@ def test_migration_stages_plist_outside_watched_launchagents_on_rerun(
     assert not any(path.parent == launch_agents for path in temporary_plist_writes)
     assert runner.loaded_labels == {"io.harnessvoice.backend"}
 
+
+
+def test_migration_refuses_cross_device_staging_before_mutation(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, keychain, writer, events, _ = (
+        make_migration_provisioner(
+            tmp_path,
+            existing_token="old-token",
+            same_device=False,
+        )
+    )
+
+    with pytest.raises(ProvisioningError, match="same filesystem"):
+        provisioner.setup()
+
+    assert events[-1] == "filesystem:check"
+    assert writer.writes == []
+    assert keychain.saved == []
+    assert keychain.deleted == []
+    assert not any(
+        call[0][:2]
+        in (
+            ["launchctl", "bootout"],
+            ["launchctl", "bootstrap"],
+            ["launchctl", "kickstart"],
+        )
+        or call[0][1:3] in (["serve", "--bg"], ["serve", "--https=8765"])
+        for call in runner.calls
+    )
+
+
+def test_migration_rollback_plist_uses_verified_unwatched_staging(
+    tmp_path: Path,
+) -> None:
+    provisioner, _, _, writer, events, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+        runner_fail_at={"neutral_bootstrap"},
+    )
+
+    with pytest.raises(ProvisioningError, match="bootstrap failed"):
+        provisioner.setup()
+
+    layout = make_layout(tmp_path)
+    rollback_plists = [
+        path
+        for path in writer.writes
+        if ".rollback-" in path.name and path.name.endswith(".plist")
+    ]
+    assert rollback_plists
+    assert all(path.parent == layout.support_dir for path in rollback_plists)
+    assert events.index("filesystem:check") < next(
+        index
+        for index, event in enumerate(events)
+        if event.startswith("write:")
+    )
 
 
 @pytest.mark.parametrize(

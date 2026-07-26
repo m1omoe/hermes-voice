@@ -122,6 +122,8 @@ class FileWriter(Protocol):
 
     def exists(self, path: Path) -> bool: ...
 
+    def same_filesystem(self, first: Path, second: Path) -> bool: ...
+
     def replace(self, source: Path, destination: Path) -> None: ...
 
     def unlink(self, path: Path) -> None: ...
@@ -218,6 +220,11 @@ class LocalFileWriter:
 
     def exists(self, path: Path) -> bool:
         return path.exists()
+
+    def same_filesystem(self, first: Path, second: Path) -> bool:
+        self.mkdir(first)
+        self.mkdir(second)
+        return first.resolve().stat().st_dev == second.resolve().stat().st_dev
 
     def replace(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -645,6 +652,18 @@ class _DeploymentTransaction:
         return token
 
     def _stage_and_validate(self) -> None:
+        try:
+            same_filesystem = self.provisioner.writer.same_filesystem(
+                self.layout.support_dir, self.backend_plist.parent
+            )
+        except OSError as exc:
+            raise ProvisioningError(
+                "staging filesystem verification failed"
+            ) from exc
+        if not same_filesystem:
+            raise ProvisioningError(
+                "support and LaunchAgents directories must share the same filesystem"
+            )
         wrapper = render_backend_wrapper(self.layout)
         plist = render_backend_plist(self.layout, self.wrapper)
         self._register(
