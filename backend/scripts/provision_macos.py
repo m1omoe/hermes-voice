@@ -32,8 +32,6 @@ KEYCHAIN_SERVICE = "HERMES_VOICE_TOKEN"
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT = 30.0
 HEALTH_INTERVAL = 1.0
-LAUNCHCTL_BOOTSTRAP_MAX_ATTEMPTS = 21
-LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL = 0.25
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"
 RENEWAL_LABEL = "io.harnessvoice.cert-renew"
@@ -511,7 +509,7 @@ class _DeploymentTransaction:
         self.legacy_plist = launch_agents / f"{LEGACY_BACKEND_LABEL}.plist"
         self.staged_wrapper = self._temporary_path(self.wrapper, "staged", nonce)
         self.staged_plist = self._temporary_path(
-            self.backend_plist, "staged", nonce
+            layout.support_dir / self.backend_plist.name, "staged", nonce
         )
         self._secrets: list[str] = []
 
@@ -703,7 +701,12 @@ class _DeploymentTransaction:
                 f"missing snapshot content for {snapshot.path.name}"
             )
         nonce = f"{os.getpid()}-{secrets.token_hex(4)}"
-        staged = self._temporary_path(snapshot.path, "rollback", nonce)
+        staging_path = (
+            self.layout.support_dir / snapshot.path.name
+            if snapshot.path == self.backend_plist
+            else snapshot.path
+        )
+        staged = self._temporary_path(staging_path, "rollback", nonce)
         mode = 0o755 if snapshot.path == self.wrapper else 0o644
         try:
             self.provisioner.writer.write_bytes(
@@ -992,20 +995,12 @@ class MacProvisioner:
 
     def _bootstrap_agent(self, label: str, plist: Path) -> None:
         uid = f"gui/{self.user_id}"
-        service = f"{uid}/{label}"
-        bootstrap = ["launchctl", "bootstrap", uid, str(plist)]
-        action = f"{label} LaunchAgent bootstrap"
-        for attempt in range(LAUNCHCTL_BOOTSTRAP_MAX_ATTEMPTS):
-            result = self.runner.run(bootstrap)
-            if result.returncode == 0:
-                break
-            if self.runner.run(["launchctl", "print", service]).returncode == 0:
-                raise ProvisioningError(f"{action} failed")
-            if attempt + 1 == LAUNCHCTL_BOOTSTRAP_MAX_ATTEMPTS:
-                raise ProvisioningError(f"{action} failed")
-            self.sleeper(LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL)
         self._run_checked(
-            ["launchctl", "kickstart", "-k", service],
+            ["launchctl", "bootstrap", uid, str(plist)],
+            f"{label} LaunchAgent bootstrap",
+        )
+        self._run_checked(
+            ["launchctl", "kickstart", "-k", f"{uid}/{label}"],
             f"{label} LaunchAgent start",
         )
 
