@@ -3,32 +3,36 @@
 ## Delivered
 
 - macOS + Tailscale provisioner with runtime path/MagicDNS discovery.
-- Generated neutral `io.harnessvoice.*` LaunchAgents and renewal assets.
-- Long-lived server token stored in macOS Keychain; no guided-setup dotenv.
-- Optional BWS bootstrap passes the token through a sanitized child environment.
+- Guided setup owns persistent Tailscale Serve HTTPS and a loopback-only backend; direct-TLS remains an advanced manual mode.
+- Serve runtime fails closed unless bind, proxy trust, certificate-mode, and non-empty-token invariants all hold.
+- Generated neutral `io.harnessvoice.backend` LaunchAgent; obsolete renewal and legacy agents/assets are removed only after verified cutover.
+- Long-lived server token stored in macOS Keychain; a hidden Security.framework launcher adds it only to the final backend process environment.
+- Optional BWS bootstrap is one-shot only; the installed backend has no BWS or dotenv runtime dependency.
+- Transactional migration snapshots files, Keychain, loaded labels, and exact Serve ownership; pre-commit failures roll back in reverse order.
+- LaunchAgent plist staging occurs outside watched `~/Library/LaunchAgents`, on a verified same filesystem; bootout completion is confirmed before replacement/bootstrap.
 - SQLite pairing tickets: SHA-256 verifier, five-minute expiry, atomic single claim.
-- Unauthenticated pairing claim exposed only when token and TLS are configured.
+- Pairing requires exact Serve or complete direct-TLS mode, public HTTPS/non-mock health, and authenticated available Hermes before issuing a QR.
 - Terminal QR contains version, HTTPS URL, pairing ID, and one-time secret only.
 - iOS strict QR parser, claim-then-authenticate coordinator, native camera scanner.
 - First-run onboarding and saved-server manager entry points; manual and Bonjour paths retained.
 
 ## Verification
 
-- `uv run --extra dev pytest` from `backend/`: 292 passed.
-- Self-serve backend files: ruff clean.
-- `xcodegen generate --spec ios/HermesVoice/project.yml --project ios/HermesVoice`: succeeded.
-- Focused profile + pairing tests: 40 passed.
-- Full iOS suite on iPhone 17 simulator: 126 passed.
-- Task reviews clean for Tasks 1–7; final adversarial review clean after fixes for real-harness launchd readiness and consumed-ticket retry.
+- Final backend suite: 363 passed; changed backend files ruff clean.
+- Final iOS suite on iPhone 17 simulator: 126 passed.
+- Per-task reviews and whole-branch adversarial review clean after fixes.
+- Live Mandalore migration succeeded with exact `https:8765 -> http://127.0.0.1:8765` Serve ownership.
+- Public `/health`: `status: ok`, `scheme: https`, `mock: false`; authenticated Hermes readiness passed during setup and pair generation.
+- Neutral LaunchAgent restart returned healthy; legacy and renewal labels/assets are absent.
+- Two consecutive `setup --from-bws` runs from merged `main` succeeded, proving rerun idempotence and updating the installed working directory off the feature worktree.
+- TestFlight 1.0 build 31 uploaded on 2026-07-25 with the QR scanner/setup flow.
 
 ## Pending physical acceptance
 
-- Attempted `setup --from-bws` on Mandalore on 2026-07-23.
-- Blocked after approval: the App Store Tailscale client cannot write certificate/key output outside its sandbox (`operation not permitted`), including `/tmp`.
-- Existing Mandalore deployment remains on Tailscale Serve; direct-cert provisioning was not installed.
-- Choose or implement a Serve-compatible pairing readiness path before retrying physical acceptance.
-- Then scan from iPhone, confirm profile + real Hermes turn, reject replay/expiry, verify login restart, and exercise manual/Bonjour fallbacks.
-- Do not call optional BWS integration accepted until the live generated wrapper runs without a secret dotenv.
+- Install TestFlight build 31 after processing.
+- Scan a fresh QR from iPhone; confirm saved/active Mandalore profile and a real Hermes turn.
+- Confirm consumed-ticket replay and expired-ticket rejection.
+- Exercise manual URL/token and Bonjour fallback paths on device.
 
 ## Known repository-wide verification issue
 

@@ -4,14 +4,10 @@
 
 ## Plan
 
-- [x] Pairing ticket store + claim API. Verify: `uv run --directory backend pytest tests/test_pairing.py -v` (19 pairing tests; full backend 237 passed; Fable re-review SHIP)
-- [x] Portable launchd renderer — committed `8a920ad` + hardening `b8de192`, `398c603`; task review clean after two security fixes. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (8 passed; ruff clean; no maintainer-path matches).
-- [x] Guided provisioner + terminal QR — `310b4a3..b65c31d`; task review clean after security hardening. Verify: `uv run --directory backend pytest tests/test_provisioning.py -v` (38 focused; 276 backend total; ruff clean).
-- [x] iOS pairing payload + claim client — `1006cbe`, `9c086d6`; task review clean. Verify: focused `ServerPairingTests` 15/15; full iOS target 116/116 via the same scheme/destination.
-- [x] iOS QR scanner/setup sheet — `3bd5a43`, `6d6df69`, `153d9ed`; task review clean. Verify: focused `ServerPairingTests` 22/22; no-signing iPhone 17 build. On-device camera permission/scan remains for physical acceptance.
-- [x] Onboarding + server manager — `b59c13f`; task review clean. Verify: focused profile/pairing suites 40/40; full iOS suite 126/126 on iPhone 17 simulator (2026-07-23).
-- [x] Docs + automated regression — backend 292 passed; self-serve backend files ruff-clean; full iOS suite 126 passed; final adversarial review clean after two fix rounds. Full backend-wide ruff remains pre-existing-red outside this feature.
-- [?] Mandalore physical acceptance blocked: guided `setup --from-bws` reached certificate approval, then the App Store Tailscale client rejected `/tmp` certificate output with `operation not permitted`. Existing Mandalore backend remains on Tailscale Serve. Resume after choosing/supporting a Serve-compatible pairing readiness path; then scan, real turn, replay/expiry, login restart, manual/Bonjour checks.
+- [x] Self-serve pairing stack merged: ticket/claim API, portable provisioner, strict iOS scanner/client, onboarding + server manager. Verify: backend + iOS suites.
+- [x] Tailscale Serve-default guided setup merged from `tailscale-serve-default`: loopback/proxy/token invariants; Keychain-native launcher; exact Serve ownership; transactional legacy/rerun migration; pair readiness gate; updated public docs. Plan/spec: `docs/superpowers/{plans,specs}/2026-07-25-tailscale-serve-default*`.
+- [x] Automated + server acceptance: backend 363 passed; iOS 126 passed; changed files ruff clean; per-task/whole-branch reviews clean; Mandalore setup/restart/exact mapping/legacy cleanup passed; two consecutive merged-main reruns passed.
+- [?] Device acceptance (USER): TestFlight 1.0 build 31 uploaded 2026-07-25. After processing/install: scan fresh QR, real Hermes turn, consumed/expired ticket rejection, manual URL/token + Bonjour fallbacks.
 
 ## Server profiles — MERGED to main (2026-07-16); on-device acceptance pending
 
