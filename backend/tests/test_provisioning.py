@@ -941,18 +941,28 @@ def test_bootstrap_retry_recovers_rollback_restart_race(tmp_path: Path) -> None:
     }
 
 
-def test_bootstrap_retry_permanent_failure_is_bounded_and_loud(
+def test_bootstrap_retry_permanent_failure_is_bounded_with_backward_clock(
     tmp_path: Path,
 ) -> None:
+    max_attempts = provision_macos.LAUNCHCTL_BOOTSTRAP_MAX_ATTEMPTS
     provisioner, runner, _, _, _, _ = make_migration_provisioner(
         tmp_path,
         existing_token="old-token",
         runner_fail_at={"neutral_bootstrap_permanent"},
     )
     runner.loaded_labels = set()
-    clock = FakeClock()
-    provisioner.clock = clock
-    provisioner.sleeper = clock.sleep
+    clock_calls = 0
+    sleeps: list[float] = []
+
+    def backward_then_expire() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls > max_attempts + 2:
+            return 1_000.0
+        return -float(clock_calls)
+
+    provisioner.clock = backward_then_expire
+    provisioner.sleeper = sleeps.append
     plist = migration_asset_paths(make_layout(tmp_path))["backend_plist"]
 
     with pytest.raises(
@@ -966,13 +976,48 @@ def test_bootstrap_retry_permanent_failure_is_bounded_and_loud(
         for call in runner.calls
         if call[0][:2] == ["launchctl", "bootstrap"]
     ]
-    assert len(bootstrap_calls) > 1
-    assert clock.now == provision_macos.LAUNCHCTL_BOOTSTRAP_RETRY_TIMEOUT
+    assert len(bootstrap_calls) == max_attempts
+    assert sleeps == [
+        provision_macos.LAUNCHCTL_BOOTSTRAP_RETRY_INTERVAL
+    ] * (max_attempts - 1)
+    assert clock_calls == 0
     assert not any(
         call[0][:2] == ["launchctl", "kickstart"]
         for call in runner.calls
     )
     assert runner.loaded_labels == set()
+
+
+def test_bootstrap_retry_loaded_label_stops_without_duplicate_or_kickstart(
+    tmp_path: Path,
+) -> None:
+    provisioner, runner, _, _, _, _ = make_migration_provisioner(
+        tmp_path,
+        existing_token="old-token",
+        runner_fail_at={"neutral_bootstrap"},
+    )
+    runner.loaded_labels = set()
+    clock = FakeClock()
+    provisioner.clock = clock
+    provisioner.sleeper = clock.sleep
+    plist = migration_asset_paths(make_layout(tmp_path))["backend_plist"]
+
+    with pytest.raises(
+        ProvisioningError,
+        match=r"io\.harnessvoice\.backend LaunchAgent bootstrap failed",
+    ):
+        provisioner._bootstrap_agent("io.harnessvoice.backend", plist)
+
+    assert sum(
+        call[0][:2] == ["launchctl", "bootstrap"]
+        for call in runner.calls
+    ) == 1
+    assert clock.sleeps == []
+    assert not any(
+        call[0][:2] == ["launchctl", "kickstart"]
+        for call in runner.calls
+    )
+    assert runner.loaded_labels == {"io.harnessvoice.backend"}
 
 
 @pytest.mark.parametrize(
