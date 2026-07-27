@@ -62,6 +62,8 @@ def parse_serve_status(
         return ServeMappingState(False, False, "malformed Serve status JSON")
     if not isinstance(status, dict):
         return ServeMappingState(False, False, "malformed Serve status document")
+    if len(status) == 0:
+        return ServeMappingState(False, True, None)
 
     tcp = status.get("TCP")
     web = status.get("Web")

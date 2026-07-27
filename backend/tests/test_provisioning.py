@@ -65,6 +65,26 @@ def test_serve_status_parser_recognizes_fully_absent_mapping() -> None:
     assert state.conflict is None
 
 
+def test_serve_status_parser_recognizes_empty_document_as_absent() -> None:
+    state = provision_macos.parse_serve_status(
+        " \n{}\n ", "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is True
+    assert state.conflict is None
+
+
+def test_serve_status_parser_rejects_nonempty_document_without_tcp_web() -> None:
+    state = provision_macos.parse_serve_status(
+        '{"Funnel": {}}', "mandalore.tailnet.ts.net"
+    )
+
+    assert state.exact is False
+    assert state.absent is False
+    assert state.conflict == "malformed TCP or Web Serve status"
+
+
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
@@ -292,6 +312,33 @@ def test_setup_does_not_write_or_bootstrap_renewal_assets(tmp_path: Path) -> Non
         for arg in [call[0][2:]]
     ]
     assert not any("renew" in target for target in bootstrap_targets)
+
+
+def test_setup_installs_serve_from_fresh_empty_status(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        serve_statuses=[
+            "{}",
+            "{}",
+            EXACT_SERVE_STATUS,
+            EXACT_SERVE_STATUS,
+        ]
+    )
+    provisioner, _, _ = make_provisioner(tmp_path, runner)
+
+    provisioner.setup()
+
+    assert runner.serve_statuses == []
+    assert any(
+        call[0][1:]
+        == [
+            "serve",
+            "--bg",
+            "--https=8765",
+            "http://127.0.0.1:8765",
+        ]
+        for call in runner.calls
+    )
+    assert runner.health_calls >= 1
 
 class FakeRunner:
     def __init__(
