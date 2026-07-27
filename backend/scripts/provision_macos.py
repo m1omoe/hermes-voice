@@ -842,6 +842,35 @@ class MacProvisioner:
         self.output = output
         self.tailscale = tailscale
 
+    @staticmethod
+    def _require_hermes_model(runner: CommandRunner, hermes_bin: Path) -> None:
+        configured = runner.run(
+            [str(hermes_bin), "config", "get", "model.default"]
+        )
+        if configured.returncode != 0 or not configured.stdout.strip():
+            raise ProvisioningError(
+                "Hermes has no default model; run `hermes model` to choose "
+                "and authenticate one, then try again"
+            )
+        ready = runner.run(
+            [
+                str(hermes_bin),
+                "--safe-mode",
+                "--toolsets",
+                "context_engine",
+                "--model",
+                configured.stdout.strip(),
+                "-z",
+                "Reply with exactly: OK",
+            ]
+        )
+        if ready.returncode != 0 or not ready.stdout.strip():
+            raise ProvisioningError(
+                "Hermes model is not ready; run `hermes model` to choose "
+                "and authenticate one, then try again"
+            )
+
+
     @classmethod
     def discover(
         cls,
@@ -979,6 +1008,7 @@ class MacProvisioner:
                 platform_name=self.platform_name,
                 hermes_bin=requested_hermes,
             )
+            self._require_hermes_model(self.runner, layout.hermes_bin)
             tailscale = self._find_tailscale()
             return layout, tailscale
 
@@ -997,6 +1027,7 @@ class MacProvisioner:
         else:
             uv = str(layout.uv)
             hermes_bin = layout.hermes_bin
+        self._require_hermes_model(self.runner, hermes_bin)
         tailscale = self._find_tailscale()
         dns_name = self._normalize_dns(layout.dns_name)
         if not dns_name:

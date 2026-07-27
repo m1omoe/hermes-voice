@@ -307,6 +307,8 @@ class FakeRunner:
         health_body: dict | None = None,
         health_bodies: list[dict] | None = None,
         harnesses_body: list[dict] | None = None,
+        hermes_model: CommandResult | None = None,
+        hermes_readiness: CommandResult | None = None,
         serve_statuses: list[str] | None = None,
     ) -> None:
         self.uv = uv
@@ -316,6 +318,8 @@ class FakeRunner:
         self.dns_name = dns_name
         self.bws_ok = bws_ok
         self.bws_missing = bws_missing
+        self.hermes_model = hermes_model or CommandResult(0, "gpt-5.6-luna\n", "")
+        self.hermes_readiness = hermes_readiness or CommandResult(0, "OK\n", "")
         self.serve_statuses = (
             list(serve_statuses)
             if serve_statuses is not None
@@ -358,6 +362,10 @@ class FakeRunner:
     ) -> CommandResult:
         self.calls.append((args, env, input))
         self.capture_output.append(capture_output)
+        if args[1:] == ["config", "get", "model.default"]:
+            return self.hermes_model
+        if args[1:5] == ["--safe-mode", "--toolsets", "context_engine", "--model"]:
+            return self.hermes_readiness
         if args[1:] == ["serve", "status", "--json"]:
             if not self.serve_statuses:
                 raise AssertionError("unexpected extra Tailscale Serve status check")
@@ -1424,6 +1432,50 @@ def test_setup_stops_before_install_when_hermes_cannot_be_resolved(tmp_path: Pat
     assert not any("ready" in message.lower() for message in output)
 
 
+def test_setup_rejects_missing_hermes_model_before_mutation(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        hermes_model=CommandResult(1, "", "Config key not set: model.default")
+    )
+    provisioner, keychain, writer = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="hermes model"):
+        provisioner.setup()
+
+    assert any(
+        call[0][1:] == ["config", "get", "model.default"] for call in runner.calls
+    )
+    assert not writer.text
+    assert keychain.saved == []
+    assert not any("serve" in call[0] or "launchctl" in call[0] for call in runner.calls)
+
+
+def test_setup_rejects_unusable_hermes_model_before_mutation(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        hermes_readiness=CommandResult(1, "", "provider authentication failed")
+    )
+    provisioner, keychain, writer = make_provisioner(tmp_path, runner)
+
+    with pytest.raises(ProvisioningError, match="hermes model"):
+        provisioner.setup()
+
+    assert any(
+        call[0][1:]
+        == [
+            "--safe-mode",
+            "--toolsets",
+            "context_engine",
+            "--model",
+            "gpt-5.6-luna",
+            "-z",
+            "Reply with exactly: OK",
+        ]
+        for call in runner.calls
+    )
+    assert not writer.text
+    assert keychain.saved == []
+    assert not any("serve" in call[0] or "launchctl" in call[0] for call in runner.calls)
+
+
 def test_discover_uses_tailscale_app_bundle_when_path_lookup_is_absent(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1922,6 +1974,11 @@ def test_fresh_pair_process_reuses_custom_hermes_bin_from_setup_environment(
     assert pair.layout is not None
     assert pair.layout.hermes_bin == Path(hermes_bin)
     assert "custom-hermes" in pair_runner.which_calls
+    assert not any(
+        call[0][1:] == ["config", "get", "model.default"]
+        or "-z" in call[0]
+        for call in pair_runner.calls
+    )
 
 
 def test_pair_refuses_when_https_health_is_not_ready(tmp_path: Path) -> None:
