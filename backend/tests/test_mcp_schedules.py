@@ -12,7 +12,7 @@ import pytest
 
 from app import schedules
 from app.mcp_schedules import create_schedule, delete_schedule, list_schedules
-from tests.conftest import FakeHermes, FakeTTS, build_client
+from tests.conftest import FakeHermes, FakeTTS
 
 
 @pytest.fixture
@@ -29,6 +29,7 @@ def live_backend(temp_db: Path, monkeypatch):
     import time as _time
 
     import uvicorn
+
     from app.main import create_app
 
     app = create_app(hermes=FakeHermes(), tts=FakeTTS())

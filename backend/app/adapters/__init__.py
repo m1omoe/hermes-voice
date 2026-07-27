@@ -16,4 +16,4 @@ ADAPTER_CLASSES = {
     "opencode": OpenCodeAdapter,
 }
 
-__all__ = ["ClaudeAdapter", "CodexAdapter", "OpenCodeAdapter", "ADAPTER_CLASSES"]
+__all__ = ["ADAPTER_CLASSES", "ClaudeAdapter", "CodexAdapter", "OpenCodeAdapter"]

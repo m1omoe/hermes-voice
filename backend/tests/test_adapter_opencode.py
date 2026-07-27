@@ -30,7 +30,7 @@ TOOL_RUN_EVENTS = [
         "sessionID": SES,
         "part": {
             "type": "text",
-            "text": "Creating `note.txt`, then I’ll read it back.",
+            "text": "Creating `note.txt`, then I'll read it back.",
             "metadata": {"openai": {"phase": "commentary"}},
         },
     },

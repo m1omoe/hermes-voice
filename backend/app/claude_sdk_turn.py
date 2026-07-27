@@ -77,7 +77,7 @@ async def stream_claude_approval_turn(
             )
         except asyncio.CancelledError:
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("claude SDK turn error: %s", e)
             broker.emit(turn_id, {"type": "error", "detail": f"claude failed: {e}"})
         finally:
@@ -188,7 +188,7 @@ async def _drive(
                         audio_url = _start_stream(app, tts, make_speakable(text), voice_id=voice_id)
                         if audio_url:
                             broker.emit(turn_id, {"type": "audio", "url": audio_url})
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         logger.warning("claude SDK turn tts error: %s", e)
                 broker.emit(turn_id, {"type": "done", "session_id": sid})
                 return

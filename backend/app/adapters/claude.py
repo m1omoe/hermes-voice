@@ -466,7 +466,7 @@ class ClaudeAdapter:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self._settings.hermes_timeout
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             proc.kill()
             raise HermesError(
                 f"claude timed out after {self._settings.hermes_timeout}s"
@@ -506,7 +506,7 @@ class ClaudeAdapter:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self._settings.hermes_timeout
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             proc.kill()
             raise HermesError(
                 f"claude timed out after {self._settings.hermes_timeout}s"

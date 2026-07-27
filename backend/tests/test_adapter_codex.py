@@ -14,7 +14,6 @@ from app.adapters.codex import (
 from app.hermes import StreamReply, StreamTool
 from app.session_audit import ToolCallSummary
 
-
 # Real capture: a turn that ran `echo hi`, then replied "done".
 TOOL_TURN_EVENTS = [
     {"type": "thread.started", "thread_id": "019e88a7-2b5a-7852-a3b9-517b5e25b0a4"},

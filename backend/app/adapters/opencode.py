@@ -258,7 +258,7 @@ class OpenCodeAdapter:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self._settings.hermes_timeout
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             proc.kill()
             await proc.wait()
             raise HermesError(

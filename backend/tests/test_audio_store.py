@@ -2,7 +2,7 @@
 import asyncio
 import os
 
-from app.audio_store import AudioStore, _TTL_SECONDS
+from app.audio_store import _TTL_SECONDS, AudioStore
 
 
 def test_close_removes_temp_dir_and_cancels_producers():

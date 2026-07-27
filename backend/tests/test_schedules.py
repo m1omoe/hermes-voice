@@ -357,10 +357,14 @@ def test_devices_endpoint_roundtrip(temp_db: Path) -> None:
     assert r.status_code == 200
 
     # Unregister.
-    r = client.delete("/api/devices/a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4")
+    r = client.delete(
+        "/api/devices/a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    )
     assert r.status_code == 204
     # Unregister again — idempotent 204.
-    r = client.delete("/api/devices/a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4")
+    r = client.delete(
+        "/api/devices/a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    )
     assert r.status_code == 204
 
 

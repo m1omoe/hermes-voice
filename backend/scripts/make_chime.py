@@ -8,7 +8,6 @@ Usage: python3 backend/scripts/make_chime.py
 """
 from __future__ import annotations
 
-import math
 import struct
 import subprocess
 import sys
@@ -70,7 +69,13 @@ def convert_to_caf(wav: Path, caf: Path) -> None:
 
 
 def main() -> int:
-    out_dir = Path(__file__).resolve().parent.parent.parent / "ios" / "HermesVoice" / "HermesVoice" / "Resources"
+    out_dir = (
+        Path(__file__).resolve().parent.parent.parent
+        / "ios"
+        / "HermesVoice"
+        / "HermesVoice"
+        / "Resources"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     wav_path = out_dir / "hermes-chime.wav"
     caf_path = out_dir / "hermes-chime.caf"

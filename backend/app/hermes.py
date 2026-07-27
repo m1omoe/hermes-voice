@@ -149,7 +149,7 @@ class HermesClient:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self._settings.hermes_timeout
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             proc.kill()
             raise HermesError(
                 f"hermes timed out after {self._settings.hermes_timeout}s"
