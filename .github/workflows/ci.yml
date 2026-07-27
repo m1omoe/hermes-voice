@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Critical: the suite must run with backend/ as the working directory.
+        # Running pytest from the repo root never loads backend/pyproject.toml,
+        # so `asyncio_mode = "auto"` is missed and async tests fail spuriously.
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
+
+      - name: Install dependencies
+        # Never --all-extras: it pulls the "local" extra (faster-whisper),
+        # which changes STT provider selection and breaks the "no STT
+        # configured" assertions.
+        #
+        # "provision" is required as well as "dev": it supplies `qrcode`, and
+        # without it 4 QR-pairing tests in test_provisioning.py SKIP silently
+        # rather than fail. QR pairing is part of the setup path, so skipping
+        # it would leave a green CI hiding uncovered code.
+        run: uv sync --extra dev --extra provision
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/HermesVoice/project.yml --project ios/HermesVoice
+
+      - name: Build
+        # `build`, not `test`: running HermesVoiceTests would require pinning
+        # a concrete simulator name/OS version, which drifts as GitHub
+        # updates the macos-latest Xcode/simulator catalog and would make
+        # this job flaky. Building against a generic iOS Simulator
+        # destination (no device boot, no code signing) is deterministic
+        # across runner images. A green build gate is more valuable than a
+        # flaky test gate for this first iteration; add a pinned-simulator
+        # `xcodebuild test` step later once this workflow has proven stable.
+        run: |
+          xcodebuild build \
+            -project ios/HermesVoice/HermesVoice.xcodeproj \
+            -scheme HermesVoice \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
