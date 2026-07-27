@@ -245,3 +245,11 @@
 **Alternatives considered**: Generate and renew certificate files; keep BWS in the LaunchAgent runtime; trust forwarded headers from arbitrary peers; read Keychain through `/usr/bin/security`; stage hidden temporary plists beside the installed LaunchAgent; retry failed bootstrap without first proving the prior label is absent.
 
 **Rationale**: Serve centralizes certificate lifecycle and exposes only a loopback backend. Exact proxy trust preserves the tailnet boundary without trusting spoofed headers from network peers. Native Keychain access avoids both plaintext assets and headless CLI authorization hangs. Unwatched, same-filesystem staging plus absence-confirmed launchd transitions gives atomic replacement and rollback without macOS Background Task Management racing the provisioner. This supersedes the runtime-`bws-project` portion of the 2026-07-19 Mandalore recovery decision; BWS remains an optional one-shot token source for `setup --from-bws`.
+
+## [2026-07-25] Guided setup proves Hermes inference with an empty tool surface
+
+**Context**: Live QR acceptance exposed that backend `/api/harnesses` availability only proved the Hermes executable existed. An unset default model therefore passed setup and pairing but failed the first voice turn. A normal `hermes -z` is unsuitable before user confirmation because one-shot mode auto-approves the configured tools and loads repository rules, memory, plugins, and MCP servers.
+
+**Decision**: Before any guided setup mutation, resolve `model.default` and run a real inference as `hermes --safe-mode --toolsets context_engine --model <configured> -z ...`. Hermes' built-in `context_engine` toolset is empty; safe mode excludes user rules, memory, plugins, MCP servers, and customizations. Keep QR generation on its existing token, Serve/direct-TLS, public health, and authenticated backend readiness gates instead of issuing another local model turn.
+
+**Rationale**: A real inference catches missing or expired provider authentication and unreachable providers that a config check cannot, while the empty tool/context surface preserves the pre-confirmation no-mutation boundary. Restricting the probe to setup avoids adding latency and unrelated local-provider coupling to every pairing-code request.

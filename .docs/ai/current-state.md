@@ -6,8 +6,8 @@
 
 - [x] Self-serve pairing stack merged: ticket/claim API, portable provisioner, strict iOS scanner/client, onboarding + server manager. Verify: backend + iOS suites.
 - [x] Tailscale Serve-default guided setup merged from `tailscale-serve-default`: loopback/proxy/token invariants; Keychain-native launcher; exact Serve ownership; transactional legacy/rerun migration; pair readiness gate; updated public docs. Plan/spec: `docs/superpowers/{plans,specs}/2026-07-25-tailscale-serve-default*`.
-- [x] Automated + server acceptance: backend 363 passed; iOS 126 passed; changed files ruff clean; per-task/whole-branch reviews clean; Mandalore setup/restart/exact mapping/legacy cleanup passed; two consecutive merged-main reruns passed.
-- [?] Device acceptance (USER): TestFlight 1.0 build 31 uploaded 2026-07-25. After processing/install: scan fresh QR, real Hermes turn, consumed/expired ticket rejection, manual URL/token + Bonjour fallbacks.
+- [x] Automated + server acceptance: backend 372 passed; iOS 126 passed; changed files ruff clean; per-task/whole-branch reviews clean; Mandalore setup/restart/exact mapping/legacy cleanup passed; two consecutive merged-main reruns passed; setup now performs mutation-safe model/auth inference before changing the machine.
+- [x] Device acceptance: TestFlight QR saved/activated Mandalore; real Hermes turn completed; consumed replay + expired ticket rejected safely; manual URL/token validation passed. Live Hermes default: `openai-codex` / `gpt-5.6-luna`, medium reasoning. Bonjour remains under its existing on-device roadmap item.
 
 ## Server profiles — MERGED to main (2026-07-16); on-device acceptance pending
 

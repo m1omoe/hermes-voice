@@ -11,14 +11,14 @@
 - Transactional migration snapshots files, Keychain, loaded labels, and exact Serve ownership; pre-commit failures roll back in reverse order.
 - LaunchAgent plist staging occurs outside watched `~/Library/LaunchAgents`, on a verified same filesystem; bootout completion is confirmed before replacement/bootstrap.
 - SQLite pairing tickets: SHA-256 verifier, five-minute expiry, atomic single claim.
-- Pairing requires exact Serve or complete direct-TLS mode, public HTTPS/non-mock health, and authenticated available Hermes before issuing a QR.
+- Pairing requires exact Serve or complete direct-TLS mode, public HTTPS/non-mock health, and authenticated available Hermes before issuing a QR; setup now runs a real no-tools/no-context Hermes inference before any mutation.
 - Terminal QR contains version, HTTPS URL, pairing ID, and one-time secret only.
 - iOS strict QR parser, claim-then-authenticate coordinator, native camera scanner.
 - First-run onboarding and saved-server manager entry points; manual and Bonjour paths retained.
 
 ## Verification
 
-- Final backend suite: 363 passed; changed backend files ruff clean.
+- Final backend suite: 372 passed; changed backend files ruff clean.
 - Final iOS suite on iPhone 17 simulator: 126 passed.
 - Per-task reviews and whole-branch adversarial review clean after fixes.
 - Live Mandalore migration succeeded with exact `https:8765 -> http://127.0.0.1:8765` Serve ownership.
@@ -27,12 +27,13 @@
 - Two consecutive `setup --from-bws` runs from merged `main` succeeded, proving rerun idempotence and updating the installed working directory off the feature worktree.
 - TestFlight 1.0 build 31 uploaded on 2026-07-25 with the QR scanner/setup flow.
 
-## Pending physical acceptance
+## Physical acceptance
 
-- Install TestFlight build 31 after processing.
-- Scan a fresh QR from iPhone; confirm saved/active Mandalore profile and a real Hermes turn.
-- Confirm consumed-ticket replay and expired-ticket rejection.
-- Exercise manual URL/token and Bonjour fallback paths on device.
+- Production QR scanned on iPhone; Mandalore profile saved and activated.
+- Real Hermes voice turn completed after persisting `openai-codex` / `gpt-5.6-luna` at medium reasoning.
+- Consumed-ticket replay and expired-ticket attempts were rejected without changing the active profile.
+- Saved-server manual URL/token validation succeeded.
+- Bonjour fallback remains tracked under the existing Bonjour/on-device roadmap item; it is not a blocker for the Tailscale QR setup path.
 
 ## Known repository-wide verification issue
 
