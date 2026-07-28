@@ -1,72 +1,66 @@
-# Local notifications (replaces APNs) — design spec
+# Schedule results sync (replaces APNs) — design spec v3
 
-Status: REVISED after Fable 5 companion review (verdict REVISE; blocker + foreground gap both fixed below). Decision: `decisions.md [2026-07-27]`.
+Status: v3, after Fable 5 (REVISE) and GPT-5.6 Sol (RETHINK). Decision: `decisions.md [2026-07-27]`.
 
-## Why
+## Why, and what this is NOT
 
-APNs needs the developer's private `.p8` on every user's Mac; it cannot be distributed, and the provisioner installs none. Polling also removes the multi-backend identity problem outright — the phone knows which profile it polled — and keeps agent output off Apple's infrastructure.
+APNs needs the developer's private `.p8` on every user's Mac; it cannot be distributed, and the provisioner installs none. The phone instead polls its own backends and raises local notifications.
 
-## The blocker the first draft missed
+**This is a sync feature, not a delivery guarantee — and it must be named that way.** `earliestBeginDate` is a lower bound Apple explicitly does not honour; Low Power Mode disables background refresh outright; force-quit stops it until manual relaunch. The real contract is *"a few hours, or whenever you next open the app."* Every piece of user-facing copy says that. If timely delivery is ever required, the upgrade is a developer-operated relay sending a **content-free wake** ("profile X has news") with the phone still fetching the result from its own Mac — deliberately deferred to 1.1, and the data model below makes it a drop-in rather than a rewrite.
 
-Draft 1 polled `/api/sessions?source=schedule`. That cannot work, for three independent reasons, all verified:
+## Data model — append-only events, not columns on a mutable row
 
-1. A session's `source` is written by the harness, not by hermes-voice. The live `~/.hermes/state.db` contains exactly two values: `acp` and `cli`. There is no `schedule`, and `_fire_one` has no way to inject one — it calls `_run_turn` on the same path as a user turn (`schedules.py:500-502`).
-2. The *schedule record's* `source` (`ios`) is a different field, on a different table, in a different database.
-3. **Fatal, and a direct consequence of `decisions.md [2026-07-27]` making Claude the default harness:** `_fire_one` passes **no** `harness` argument, so fires run through the default. Claude sessions live in `~/.claude/projects/<slug>/<id>.jsonl`, while `/api/sessions` reads only `~/.hermes/state.db` (`sessions.py:19`). In the shipped configuration, fire sessions never appear in the polled endpoint at all.
+v2 put `last_fired_session_id` + `last_fire_preview` on the schedule row. That fails several ways at once: a harness session ID is not a safe fire identity (`_run_turn` permits it to collapse to `""`, `main.py:897`), the row is mutable configuration so a prompt/name edit races the result, a deleted schedule loses its result, and a 200-char preview cannot feed `/api/replay`, which needs the real text.
 
-## Shape — record the fire where the push dies
+**New table `schedule_fire_events`**, append-only, written in the **same transaction** as the `_mark_fired` success path (one commit after `_run_turn` returns — a second transaction can leave a completed schedule with no marker):
 
-**Backend (one small, additive diff).** `_fire_one` already holds the session id and assistant text at the exact point it calls `send_push` (`schedules.py:511-524`). Replace that with a write of two new columns on the **schedule row** — `last_fired_session_id` and `last_fire_preview` (~200 chars) — **on success only** — and surface both in `ScheduleResponse`.
+| column | why |
+|---|---|
+| `seq` INTEGER PK AUTOINCREMENT | the poll cursor; monotonic, harness-agnostic |
+| `fire_id` TEXT | scheduler-generated, always non-empty |
+| `schedule_id` TEXT | joins back to config |
+| `display_name` TEXT | **snapshot at fire time** — a later rename must not relabel history |
+| `harness_id` TEXT | records which harness actually ran it; schedules carry no harness today, so resume must not assume the profile's current one |
+| `session_id` TEXT NULL | optional, for resume; never used as identity |
+| `preview` TEXT | ~200 chars, lock-screen use only |
+| `full_text` TEXT | what `/api/replay` and auto-play actually speak |
+| `completed_at` INTEGER | set after the turn returns, not before the semaphore |
 
-This is harness-agnostic (works for hermes, claude, codex alike), needs no new endpoint, no fires table, and no session-store dependency. `GET /api/schedules` is already consumed by `SchedulesView`/`HermesVoiceAPI`, and JSONDecoder ignores unknown keys, so the change is purely additive.
+Endpoint: `GET /api/schedule-fires?after=<seq>&limit=N`. One cursor per profile — not a nested per-schedule map. Bounded retention.
 
-**Why a session-id marker, not a timestamp:** `_mark_fired` advances `last_fired_at` **on failure too** (`schedules.py:469-483`). Any timestamp diff would notify the user about fires that produced nothing. Equality-diffing `last_fired_session_id` — written only on success — avoids this for free, and assumes no monotonicity.
+**Migration is mandatory and currently absent.** `_init_sync` uses only `CREATE TABLE IF NOT EXISTS` (`schedules.py:113-149`) and there is **no `ALTER TABLE` or `PRAGMA user_version` anywhere in the backend** — verified. A new table is additive, but the mechanism must exist and be tested **against a database created by the old schema**, not only a fresh temp DB, or CI passes green while every existing install breaks.
 
-**iOS — one poll engine, two entry points.**
+**Compatibility is two-way.** New client + old backend must not silently observe "nothing ever fired." The endpoint's absence is an explicit unsupported signal → diagnostics say *"backend upgrade required for schedule sync."*
 
-A `FirePoller` takes a set of profiles, **concurrently** GETs `/api/schedules` per profile (authenticated with that profile's URL + token), and diffs `last_fired_session_id` against its marker.
+## Polling
 
-- *Entry point A — background.* `BGAppRefreshTask` over all profiles → one `UNNotificationRequest` per changed schedule → resubmit the task.
-- *Entry point B — foreground.* `scenePhase .active` plus a ~30–60s timer on the active profile, feeding the existing chime → Live Activity → replay pipeline **directly**, posting no notification.
+One `FirePoller` **actor** (single-flight, owning marker mutation), used by both entry points and always across **all** profiles:
 
-Entry point B is not optional: `BGAppRefreshTask` never runs while the app is foreground, so without it `willPresent` (`NotificationManager.swift:328-355`) becomes dead code and scheduled-arrival auto-play — the flagship arrival behavior — loses its only trigger.
+- **Background** — `BGAppRefreshTask`: register the identifier in `didFinishLaunching` (`AppDelegate.swift:8-14` is currently a no-op); resubmit at handler entry; concurrent task group, ~10s per-request timeout plus a top-level deadline under the empirical budget; bounded concurrency; **exactly one completion gate** (expiration only cancels — the naive "expiration also calls `setTaskCompleted`" is a double-completion race).
+- **Foreground** — `scenePhase .active` plus a light timer, also **all profiles**. Active-profile results feed the chime/Live-Activity/replay path directly; inactive-profile results raise an in-app badge naming the origin. (v2 polled only the active profile in foreground, which made Mac B invisible for as long as the app stayed open.)
 
-## Budget and unreachability
+**Cursor correctness.** Baseline is **per profile, on first successful contact** — record current state, notify nothing. Not per schedule: a schedule created and fired before the first poll would otherwise have its first fire silently swallowed. Advance the cursor **after** the notification is accepted, and check real `UNAuthorizationStatus` rather than the app-local Boolean, so a revoked permission or a failed enqueue cannot consume a result. On enable/re-enable, baseline silently first.
 
-~30s of runtime, scheduled entirely at iOS's discretion. The trap: URLSession's default request timeout is **60s — longer than the whole task budget** — and a profile behind a down tunnel fails by *timeout*, not refusal, so sequential "active-first" polling lets one dead Mac starve every other profile.
+**Route safety.** A profile UUID alone is not origin identity: `saveProfile` can replace URL, token, and harness under the same UUID (`AppSettings.swift:275-292`). Every request binds a route revision and revalidates before committing; profile edit or removal cancels in-flight polls, so a late response cannot be attributed to a new endpoint or resurrect a pruned cursor.
 
-Required: concurrent task group; ~10s per-request timeout; commit each profile's marker the moment its fetch returns (incremental, so expiry loses nothing already done); expiration handler cancels the group and still calls `setTaskCompleted`; resubmit on every run and on `scenePhase .background`; skip entirely when notifications are disabled. "Active first" survives only as commit priority, never as ordering.
+## Arrival behaviour
 
-Rejected: `BGProcessingTask` (wants idle/charging), `NEAppPushProvider` (Wi-Fi-SSID-scoped, incompatible with Tailscale roaming), silent push (is APNs).
+Result data comes from `full_text`, never from the notification body. Default body stays generic ("Schedule ran"); preview is opt-in; keep `hermes-chime.caf` and `threadIdentifier = scheduleId`.
 
-## Marker storage
+**Cross-profile arrivals must remain actionable.** v2 said "no resume," which avoids a wrong-backend 404 by discarding the feature. Instead: show the stored result regardless of active routing, then offer an explicit *"Switch to Mac B and continue"* guarded by the existing switch-eligibility checks. No automatic switching. If the profile is gone, show the retained result and a clear unavailable-route state.
 
-A side table in UserDefaults, `hv.fireMarkers`, shaped `[profileUUID: [scheduleId: lastFiredSessionId]]` — deliberately **not** fields inside `BackendProfile`, which would force a Codable migration of the profiles blob and let background writes race the MainActor `didSet` persistence (`AppSettings.swift:77-89`).
-
-Correctness: key by `BackendProfile.id` (a stable `let UUID`) so renames and URL edits keep markers; prune the entry in `removeProfile`; prune schedule ids absent from a response. **An absent marker primes silently** — record current state, notify nothing — so a new profile or a post-reinstall re-onboard never floods historical fires. Not Keychain: markers aren't secrets, and Keychain's reinstall survival is actively wrong here.
-
-## Cross-profile arrival identity
-
-`ScheduledArrival` (`NotificationManager.swift:73-79`) carries no profile field, and today the badge tap resumes against the **active** backend (`MainView.swift:28-31`) — so a profile-B fire resumed against active profile A 404s. Foreground auto-play likewise replays against `settings.backendURL` (`:424-430`).
-
-Rule, consistent with the no-auto-switching non-goal: **same-profile arrivals** get full resume + auto-play, replay bound to the origin profile's URL + token; **cross-profile arrivals** degrade to a notification/badge naming the profile, with no resume. `userInfo` must carry `schedule_id`, `session_id`, and `profile_id`, or `parseArrival` returns nil and taps do nothing.
-
-## Content
-
-Default: title = schedule display name, body = "Schedule ran — tap to hear the result." No agent output on the lock screen — today's APNs path puts up to 300 raw chars there (`push.py:27,36`), which is part of what this replaces. Reply preview is **opt-in**, sourced from `last_fire_preview`.
-
-Preserve parity: `UNNotificationSound(named: "hermes-chime.caf")` and `threadIdentifier = scheduleId` for per-schedule grouping. Missed fires collapsing to latest-only per schedule is **designed behavior**, not a bug.
-
-## Honest timeliness promise
-
-> "Your Mac runs schedules on time. Your phone checks for results periodically in the background — iOS decides when, typically within a few hours — and instantly whenever you open the app."
-
-Required in three places: the Settings notifications footer (plus force-quit and Low Power Mode caveats); the schedule create/edit view, because the cadence picker is where the false expectation forms; and a per-profile "Last checked" row in diagnostics, mirroring the existing `lastReachable` pattern.
+**Arrivals must survive an ordinary app-icon launch.** `lastScheduledArrival` is populated only by `willPresent` or a notification tap (`NotificationManager.swift:328-385`), so a background-posted notification the user never taps currently reconstructs nothing. Persist pending arrivals independently of the cursor. The direct foreground path must update badge and Live Activity explicitly — Live Activity is local-only (`pushType: nil`) so it survives the APNs removal, but its content path must be rewired off `arrival.body`.
 
 ## Removal footprint (Phase D — after device acceptance)
 
-Backend: `push.py`, the `devices` table, `/api/devices`. iOS, larger than draft 1 listed: `registerForRemoteNotifications` (`HermesVoiceApp.swift:26`), the AppDelegate APNs callbacks, `handleAPNsToken`/coalescing/`registeredTokens`/`DeviceRegistering`, the unregister half of `handleBackendSwitch` (keep `stopForegroundPlayback`), `lastApnsToken` and its diagnostics row, `NotificationSwitchTests.swift`, `remote-notification` in Info.plist (→ `fetch` + `BGTaskSchedulerPermittedIdentifiers`), and the `aps-environment` entitlement. **Notification permission stays** — local notifications require it.
+Backend: `push.py`, `devices` table, `/api/devices`, APNs settings + env loading (`config.py:119-125,173-177`), the `aioapns` dependency and lockfile entry, device models (`models.py:167-183`), device/push tests, APNs setup docs. iOS: `registerForRemoteNotifications`, AppDelegate APNs callbacks, `handleAPNsToken`/coalescing/`registeredTokens`/`DeviceRegistering`, the unregister half of `handleBackendSwitch` (keep `stopForegroundPlayback`), `lastApnsToken` + diagnostics row, `remote-notification` and the `aps-environment` entitlement — edited in **`project.yml`**, which is the source of truth that regenerates Info.plist.
+
+**Do not simply delete `NotificationSwitchTests.swift`** — it carries race coverage the new implementation still needs. Replace with route-snapshot, poll-cancellation, cursor-CAS, and cross-profile arrival tests.
+
+## Acceptance (physical device)
+
+Locked phone + worn Watch; foreground with active and inactive profiles; background refresh; Low Power Mode; force-quit then relaunch; notification tap; and an ordinary app-icon launch. Watch delivery is system mirroring and inherits every iPhone delay.
 
 ## Non-goals
 
-No developer-operated relay. No APNs in the shipped public path. No auto-switching of the active profile from a notification.
+No relay in V1. No APNs in the shipped path. No automatic profile switching.
