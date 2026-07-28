@@ -57,6 +57,14 @@ _fire_tasks: set[asyncio.Task] = set()
 MAX_CONCURRENT_FIRES = 3
 _fire_sema = asyncio.Semaphore(MAX_CONCURRENT_FIRES)
 
+# Lock-screen preview length for a fire event. The full assistant text is kept
+# separately (full_text) for /api/replay and auto-play.
+FIRE_PREVIEW_CHARS = 200
+
+# Bounded retention: keep only the newest N fire events per schedule so the
+# table doesn't grow forever. Pruned on every insert.
+MAX_FIRE_EVENTS_PER_SCHEDULE = 50
+
 
 @dataclass
 class Schedule:
@@ -83,6 +91,32 @@ class Schedule:
             "enabled": self.enabled,
             "consecutive_fails": self.consecutive_fails,
             "source": self.source,
+        }
+
+
+@dataclass
+class ScheduleFireEvent:
+    seq: int
+    fire_id: str
+    schedule_id: str
+    display_name: str | None
+    harness_id: str
+    session_id: str | None
+    preview: str
+    full_text: str
+    completed_at: float
+
+    def as_dict(self) -> dict:
+        return {
+            "seq": self.seq,
+            "fire_id": self.fire_id,
+            "schedule_id": self.schedule_id,
+            "display_name": self.display_name,
+            "harness_id": self.harness_id,
+            "session_id": self.session_id,
+            "preview": self.preview,
+            "full_text": self.full_text,
+            "completed_at": self.completed_at,
         }
 
 
@@ -140,6 +174,25 @@ def _init_sync(path: Path | None = None) -> None:
               registered_at  REAL NOT NULL,
               last_seen_at   REAL NOT NULL
             );
+
+            -- Append-only record of every successful scheduled fire, replacing
+            -- APNs push as the sync mechanism (local-notifications-spec). This
+            -- is a NEW table added via CREATE TABLE IF NOT EXISTS — since
+            -- _init_sync runs on every create_app, an existing install's
+            -- database picks it up automatically with no migration step.
+            CREATE TABLE IF NOT EXISTS schedule_fire_events (
+              seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+              fire_id       TEXT    NOT NULL,
+              schedule_id   TEXT    NOT NULL,
+              display_name  TEXT,
+              harness_id    TEXT    NOT NULL,
+              session_id    TEXT,
+              preview       TEXT    NOT NULL,
+              full_text     TEXT    NOT NULL,
+              completed_at  REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS schedule_fire_events_schedule_id
+              ON schedule_fire_events(schedule_id);
             """
         )
         conn.commit()
@@ -163,6 +216,20 @@ def _row_to_schedule(r: sqlite3.Row) -> Schedule:
         enabled=bool(r["enabled"]),
         consecutive_fails=int(r["consecutive_fails"]),
         source=r["source"],
+    )
+
+
+def _row_to_fire_event(r: sqlite3.Row) -> ScheduleFireEvent:
+    return ScheduleFireEvent(
+        seq=int(r["seq"]),
+        fire_id=r["fire_id"],
+        schedule_id=r["schedule_id"],
+        display_name=r["display_name"],
+        harness_id=r["harness_id"],
+        session_id=r["session_id"],
+        preview=r["preview"],
+        full_text=r["full_text"],
+        completed_at=float(r["completed_at"]),
     )
 
 
@@ -444,20 +511,52 @@ def _fetch_due_sync(now: float, path: Path) -> list[Schedule]:
 
 
 async def _mark_fired(
-    id: str, fired_at: float, success: bool, path: Path | None = None,
+    id: str,
+    fired_at: float,
+    success: bool,
+    path: Path | None = None,
+    *,
+    fire_id: str | None = None,
+    display_name: str | None = None,
+    harness_id: str | None = None,
+    session_id: str | None = None,
+    assistant_text: str | None = None,
+    completed_at: float | None = None,
 ) -> None:
     await asyncio.to_thread(
-        _mark_fired_sync, id, fired_at, success, _resolve_path(path)
+        _mark_fired_sync,
+        id, fired_at, success, _resolve_path(path),
+        fire_id, display_name, harness_id, session_id, assistant_text, completed_at,
     )
 
 
-def _mark_fired_sync(id: str, fired_at: float, success: bool, path: Path) -> None:
+def _mark_fired_sync(
+    id: str,
+    fired_at: float,
+    success: bool,
+    path: Path,
+    fire_id: str | None = None,
+    display_name: str | None = None,
+    harness_id: str | None = None,
+    session_id: str | None = None,
+    assistant_text: str | None = None,
+    completed_at: float | None = None,
+) -> None:
     with _connect(path) as conn:
         row = conn.execute("SELECT * FROM schedules WHERE id = ?", (id,)).fetchone()
         if row is None:
             return
         cadence = int(row["cadence_seconds"])
         if success:
+            missing_event_data = (
+                fire_id is None or harness_id is None
+                or assistant_text is None or completed_at is None
+            )
+            if missing_event_data:
+                raise ValueError(
+                    "_mark_fired_sync(success=True) requires fire_id, "
+                    "harness_id, assistant_text, and completed_at"
+                )
             conn.execute(
                 """
                 UPDATE schedules SET
@@ -465,6 +564,37 @@ def _mark_fired_sync(id: str, fired_at: float, success: bool, path: Path) -> Non
                 WHERE id = ?
                 """,
                 (fired_at, fired_at + cadence, id),
+            )
+            # Append-only fire event, written in the SAME transaction/connection
+            # as the success mark above — a second, separate transaction could
+            # leave a completed schedule with no event if the process dies
+            # between the two writes.
+            conn.execute(
+                """
+                INSERT INTO schedule_fire_events (
+                  fire_id, schedule_id, display_name, harness_id,
+                  session_id, preview, full_text, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fire_id, id, display_name, harness_id, session_id,
+                    assistant_text[:FIRE_PREVIEW_CHARS], assistant_text,
+                    completed_at,
+                ),
+            )
+            # Bounded retention: keep only the newest N events for this
+            # schedule so the table doesn't grow forever.
+            conn.execute(
+                """
+                DELETE FROM schedule_fire_events
+                WHERE schedule_id = ? AND seq NOT IN (
+                  SELECT seq FROM schedule_fire_events
+                  WHERE schedule_id = ?
+                  ORDER BY seq DESC
+                  LIMIT ?
+                )
+                """,
+                (id, id, MAX_FIRE_EVENTS_PER_SCHEDULE),
             )
         else:
             new_fails = int(row["consecutive_fails"]) + 1
@@ -483,6 +613,32 @@ def _mark_fired_sync(id: str, fired_at: float, success: bool, path: Path) -> Non
         conn.commit()
 
 
+async def list_fire_events(
+    after: int = 0, limit: int = 30, path: Path | None = None
+) -> list[ScheduleFireEvent]:
+    return await asyncio.to_thread(
+        _list_fire_events_sync, after, limit, _resolve_path(path)
+    )
+
+
+def _list_fire_events_sync(
+    after: int, limit: int, path: Path
+) -> list[ScheduleFireEvent]:
+    if not path.exists():
+        return []
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM schedule_fire_events
+            WHERE seq > ?
+            ORDER BY seq ASC
+            LIMIT ?
+            """,
+            (after, limit),
+        ).fetchall()
+    return [_row_to_fire_event(r) for r in rows]
+
+
 async def _fire_one(app: FastAPI, sched: Schedule) -> None:
     """Run one schedule through the existing turn pipeline + send push.
 
@@ -491,16 +647,34 @@ async def _fire_one(app: FastAPI, sched: Schedule) -> None:
     from .main import _run_turn
     from .push import send_push
 
+    # Placeholder for the (rare) case an exception hits before we ever get
+    # inside the semaphore. Overwritten immediately once acquired below —
+    # capturing it AFTER the semaphore is the fix: time spent queued behind
+    # MAX_CONCURRENT_FIRES must not count against this fire's interval, or a
+    # busy backend keeps shortening the next one.
     fired_at = time.time()
     try:
         async with _fire_sema:
+            fired_at = time.time()
             # Skip TTS synthesis: the scheduled turn's audio is never consumed
             # here. The push auto-plays via /api/replay, which re-synthesizes
             # from the stored assistant_text on demand.
             response = await _run_turn(
                 app, user_text=sched.prompt, session_id=None, tts_mode="none",
             )
-            await _mark_fired(sched.id, fired_at, success=True)
+            completed_at = time.time()
+            # _run_turn was called without a harness, so it fell back to
+            # app.state.default_harness (see main.py:_run_turn) — that's the
+            # harness that actually ran this turn, not a hardcoded string.
+            await _mark_fired(
+                sched.id, fired_at, success=True,
+                fire_id=uuid.uuid4().hex,
+                display_name=sched.display_name,
+                harness_id=app.state.default_harness,
+                session_id=response.session_id or None,
+                assistant_text=response.assistant_text,
+                completed_at=completed_at,
+            )
             logger.info(
                 "schedule fired id=%s display=%r prompt=%r",
                 sched.id, sched.display_name, sched.prompt[:60],

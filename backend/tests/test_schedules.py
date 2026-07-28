@@ -170,13 +170,29 @@ async def test_mark_fired_advances_next_fire_at(temp_db: Path) -> None:
     s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
 
     fired_at = time.time()
-    await schedules._mark_fired(s.id, fired_at, success=True, path=temp_db)
+    await schedules._mark_fired(
+        s.id, fired_at, success=True, path=temp_db,
+        fire_id="fire-1", display_name=s.display_name, harness_id="hermes",
+        session_id=None, assistant_text="ok", completed_at=fired_at,
+    )
 
     updated = await schedules.get(s.id, temp_db)
     assert updated is not None
     assert updated.last_fired_at == pytest.approx(fired_at)
     assert updated.next_fire_at == pytest.approx(fired_at + 60)
     assert updated.consecutive_fails == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_fired_success_requires_event_fields(temp_db: Path) -> None:
+    """A success mark without the event payload is a programming error, not a
+    silent no-op — it must raise rather than risk a completed schedule with
+    no corresponding fire event."""
+    await schedules.init_store(temp_db)
+    s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
+
+    with pytest.raises(ValueError):
+        await schedules._mark_fired(s.id, time.time(), success=True, path=temp_db)
 
 
 @pytest.mark.asyncio
@@ -294,6 +310,246 @@ async def test_semaphore_caps_concurrent_fires(temp_db: Path) -> None:
     gate.set()
     await asyncio.gather(*fires)
     assert max_seen <= MAX_CONCURRENT_FIRES
+
+
+@pytest.mark.asyncio
+async def test_fired_at_captured_after_semaphore_not_before(
+    temp_db: Path, monkeypatch
+) -> None:
+    """fired_at (and therefore next_fire_at) must be measured after the
+    semaphore is acquired, not at _fire_one's invocation — otherwise time
+    spent queued behind MAX_CONCURRENT_FIRES silently shortens the next
+    interval. Swap in a fake semaphore with a slow __aenter__ to simulate that
+    queue delay deterministically."""
+
+    class SlowGate:
+        async def __aenter__(self):
+            await asyncio.sleep(0.1)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(schedules, "_fire_sema", SlowGate())
+
+    await schedules.init_store(temp_db)
+    s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
+
+    client = build_client(hermes=FakeHermes(reply="ok"), tts=FakeTTS())
+    app = client.app
+
+    before = time.time()
+    await schedules._fire_one(app, s)
+
+    updated = await schedules.get(s.id, temp_db)
+    assert updated is not None and updated.last_fired_at is not None
+    # The fix: fired_at reflects time AFTER the ~0.1s semaphore wait. Before
+    # the fix, fired_at was captured at `before` and this would fail.
+    assert updated.last_fired_at - before >= 0.05
+
+
+# ───────────────────── Fire events (schedule sync) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fire_writes_event_on_success(temp_db: Path) -> None:
+    fake_hermes = FakeHermes(reply="42 degrees and breezy, with a chance of more text")
+    client = build_client(hermes=fake_hermes, tts=FakeTTS())
+    app = client.app
+
+    s = await schedules.create(
+        cadence_seconds=60, prompt="weather", display_name="Weather", path=temp_db,
+    )
+    await schedules._fire_one(app, s)
+
+    events = await schedules.list_fire_events(path=temp_db)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.fire_id  # generated, non-empty
+    assert ev.schedule_id == s.id
+    assert ev.display_name == "Weather"
+    # _run_turn was called without a harness, so it fell back to
+    # app.state.default_harness — that's the harness that actually ran.
+    assert ev.harness_id == app.state.default_harness
+    assert ev.full_text == fake_hermes._reply
+    assert ev.preview == fake_hermes._reply[: schedules.FIRE_PREVIEW_CHARS]
+    assert ev.completed_at > 0
+
+
+@pytest.mark.asyncio
+async def test_fire_event_display_name_survives_later_rename(temp_db: Path) -> None:
+    """The event's display_name is a snapshot at fire time — a later rename
+    of the schedule must not relabel history."""
+    fake_hermes = FakeHermes(reply="ok")
+    client = build_client(hermes=fake_hermes, tts=FakeTTS())
+    app = client.app
+
+    s = await schedules.create(
+        cadence_seconds=60, prompt="p", display_name="Original Name", path=temp_db,
+    )
+    await schedules._fire_one(app, s)
+    await schedules.update(s.id, display_name="Renamed", path=temp_db)
+
+    events = await schedules.list_fire_events(path=temp_db)
+    assert len(events) == 1
+    assert events[0].display_name == "Original Name"
+
+
+@pytest.mark.asyncio
+async def test_fire_writes_no_event_on_failure(temp_db: Path) -> None:
+    class FailingHermes(FakeHermes):
+        async def ask(self, prompt, session_id=None):
+            raise RuntimeError("boom")
+
+    client = build_client(hermes=FailingHermes(), tts=FakeTTS())
+    app = client.app
+
+    s = await schedules.create(cadence_seconds=60, prompt="weather", path=temp_db)
+    await schedules._fire_one(app, s)
+
+    updated = await schedules.get(s.id, temp_db)
+    assert updated is not None
+    assert updated.consecutive_fails == 1
+
+    assert await schedules.list_fire_events(path=temp_db) == []
+
+
+@pytest.mark.asyncio
+async def test_fire_events_after_cursor_returns_only_newer_ascending(
+    temp_db: Path,
+) -> None:
+    await schedules.init_store(temp_db)
+    s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
+
+    for i in range(5):
+        await schedules._mark_fired(
+            s.id, time.time(), success=True, path=temp_db,
+            fire_id=f"fire-{i}", display_name=s.display_name, harness_id="hermes",
+            session_id=None, assistant_text=f"text-{i}", completed_at=time.time(),
+        )
+
+    all_events = await schedules.list_fire_events(limit=100, path=temp_db)
+    assert len(all_events) == 5
+    seqs = [e.seq for e in all_events]
+    assert seqs == sorted(seqs)
+
+    cursor = all_events[2].seq
+    newer = await schedules.list_fire_events(after=cursor, limit=100, path=temp_db)
+    assert [e.seq for e in newer] == seqs[3:]
+    assert all(e.seq > cursor for e in newer)
+
+
+@pytest.mark.asyncio
+async def test_schedule_fires_endpoint_paginates(temp_db: Path) -> None:
+    fake_hermes = FakeHermes(reply="ok")
+    client = build_client(hermes=fake_hermes, tts=FakeTTS())
+    app = client.app
+
+    s = await schedules.create(cadence_seconds=60, prompt="p", path=temp_db)
+    for _ in range(3):
+        await schedules._fire_one(app, s)
+
+    r = client.get("/api/schedule-fires")
+    assert r.status_code == 200
+    events = r.json()
+    assert len(events) == 3
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs)
+
+    r2 = client.get(f"/api/schedule-fires?after={seqs[0]}")
+    assert r2.status_code == 200
+    newer = r2.json()
+    assert [e["seq"] for e in newer] == seqs[1:]
+
+
+@pytest.mark.asyncio
+async def test_fire_events_retention_prunes_oldest(temp_db: Path) -> None:
+    await schedules.init_store(temp_db)
+    s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
+
+    total = schedules.MAX_FIRE_EVENTS_PER_SCHEDULE + 10
+    for i in range(total):
+        await schedules._mark_fired(
+            s.id, time.time(), success=True, path=temp_db,
+            fire_id=f"fire-{i}", display_name=s.display_name, harness_id="hermes",
+            session_id=None, assistant_text=f"text-{i}", completed_at=time.time(),
+        )
+
+    remaining = await schedules.list_fire_events(limit=10_000, path=temp_db)
+    assert len(remaining) == schedules.MAX_FIRE_EVENTS_PER_SCHEDULE
+    fire_ids = {e.fire_id for e in remaining}
+    # Oldest pruned, newest retained.
+    assert "fire-0" not in fire_ids
+    assert f"fire-{total - 1}" in fire_ids
+
+
+def test_fire_events_table_created_on_pre_existing_db(tmp_path: Path) -> None:
+    """Regression guard: an existing install's schedules.db (created before
+    this feature shipped) must pick up schedule_fire_events the next time
+    _init_sync runs — via plain CREATE TABLE IF NOT EXISTS, no migration
+    framework. Simulate that by hand-rolling the OLD schema first."""
+    import sqlite3
+
+    db_path = tmp_path / "old_schedules.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schedules (
+              id                TEXT    PRIMARY KEY,
+              cadence_seconds   INTEGER NOT NULL,
+              prompt            TEXT    NOT NULL,
+              display_name      TEXT,
+              created_at        REAL    NOT NULL,
+              last_fired_at     REAL,
+              next_fire_at      REAL    NOT NULL,
+              enabled           INTEGER NOT NULL DEFAULT 1,
+              consecutive_fails INTEGER NOT NULL DEFAULT 0,
+              source            TEXT    NOT NULL DEFAULT 'ios'
+            );
+            CREATE TABLE devices (
+              token          TEXT PRIMARY KEY,
+              platform       TEXT NOT NULL,
+              bundle_id      TEXT NOT NULL,
+              environment    TEXT NOT NULL,
+              registered_at  REAL NOT NULL,
+              last_seen_at   REAL NOT NULL
+            );
+            """
+        )
+        conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "schedule_fire_events" not in tables
+
+    # The regression under test: running init on a pre-existing old-schema DB.
+    schedules._init_sync(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "schedule_fire_events" in tables
+
+        conn.execute(
+            """
+            INSERT INTO schedule_fire_events (
+              fire_id, schedule_id, display_name, harness_id,
+              session_id, preview, full_text, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("fire-x", "sched-x", "name", "hermes", None, "prev", "full", time.time()),
+        )
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM schedule_fire_events"
+        ).fetchone()[0]
+    assert count == 1
 
 
 # ───────────────────── Devices (Phase B) ─────────────────────

@@ -48,6 +48,7 @@ from .models import (
     ReplayRequest,
     ReplayResponse,
     ScheduleCreateRequest,
+    ScheduleFireEventResponse,
     ScheduleResponse,
     ScheduleUpdateRequest,
     SessionDetailResponse,
@@ -734,6 +735,21 @@ def _register_routes(app: FastAPI) -> None:
         if not ok:
             raise HTTPException(status_code=404, detail="schedule not found")
         return Response(status_code=204)
+
+    @app.get(
+        "/api/schedule-fires",
+        response_model=list[ScheduleFireEventResponse],
+        dependencies=[Depends(_require_token)],
+    )
+    async def list_schedule_fires(
+        after: int = 0, limit: int = 30
+    ) -> list[ScheduleFireEventResponse]:
+        """Cursor-paged sync feed replacing APNs push: the iPhone polls this
+        with the highest `seq` it has already seen and gets back only newer
+        events, oldest first."""
+        limit = max(1, min(limit, 200))
+        items = await schedules.list_fire_events(after=after, limit=limit)
+        return [ScheduleFireEventResponse(**e.as_dict()) for e in items]
 
     @app.post(
         "/api/devices",

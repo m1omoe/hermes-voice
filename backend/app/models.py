@@ -164,6 +164,19 @@ class ScheduleUpdateRequest(BaseModel):
     enabled: bool | None = None
 
 
+class ScheduleFireEventResponse(BaseModel):
+    """One recorded fire, as returned by /api/schedule-fires."""
+    seq: int
+    fire_id: str
+    schedule_id: str
+    display_name: str | None = None
+    harness_id: str
+    session_id: str | None = None
+    preview: str
+    full_text: str
+    completed_at: float
+
+
 # ───── Push notification device registration ─────
 
 
