@@ -26,6 +26,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +70,11 @@ def _resolve_path(path: Path | None) -> Path:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
+    # NOTE: `with sqlite3.connect(...) as conn:` does NOT close the connection
+    # — the sqlite3 connection context manager only commits/rolls back the
+    # transaction. Every caller MUST wrap this in `contextlib.closing(...)`
+    # (stacked with `conn` itself where transaction semantics are also
+    # needed) or the file descriptor leaks until GC happens to collect it.
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -78,7 +84,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _init_sync(path: Path) -> None:
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS pairings (
@@ -149,7 +155,7 @@ class PairingStore:
         pairing_id, secret = _gen_id_and_secret()
         created_at = self._now()
         expires_at = created_at + ttl_seconds
-        with _connect(self._path) as conn:
+        with closing(_connect(self._path)) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO pairings (
@@ -176,7 +182,7 @@ class PairingStore:
             return False
         verifier = _hash_secret(secret)
         now = self._now()
-        with _connect(self._path) as conn:
+        with closing(_connect(self._path)) as conn, conn:
             # BEGIN IMMEDIATE acquires the write lock up front. Without it,
             # two transactions could both read claimed_at IS NULL, both
             # proceed to UPDATE, and one would silently overwrite the other.
@@ -224,7 +230,7 @@ class PairingStore:
         with claim() (claims ignore claimed_at/expires_at on rows that are
         already past expiry)."""
         now = self._now()
-        with _connect(self._path) as conn:
+        with closing(_connect(self._path)) as conn, conn:
             cur = conn.execute(
                 "DELETE FROM pairings WHERE expires_at <= ?", (now,),
             )

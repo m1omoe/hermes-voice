@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,10 @@ class SessionDetail:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
+    # NOTE: `with sqlite3.connect(...) as conn:` does NOT close the connection
+    # — the sqlite3 connection context manager only commits/rolls back the
+    # transaction. Every caller MUST wrap this in `contextlib.closing(...)`
+    # or the file descriptor leaks until GC happens to collect it.
     # Open read-only via URI; we should never write to Hermes' DB.
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=2.0)
@@ -101,7 +106,7 @@ def _list_sync(limit: int, source: str | None, db_path: Path) -> list[SessionSum
     query += " ORDER BY s.started_at DESC LIMIT ?"
     params.append(limit)
 
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         rows = conn.execute(query, params).fetchall()
 
     results: list[SessionSummary] = []
@@ -136,7 +141,7 @@ def _get_sync(session_id: str, db_path: Path) -> SessionDetail | None:
     if not db_path.exists():
         return None
 
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         session_row = conn.execute(
             "SELECT id, source, started_at, title FROM sessions WHERE id = ?",
             (session_id,),

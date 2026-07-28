@@ -19,6 +19,7 @@ import logging
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -149,6 +150,11 @@ def _resolve_path(path: Path | None) -> Path:
 
 
 def _connect(path: Path | None = None) -> sqlite3.Connection:
+    # NOTE: `with sqlite3.connect(...) as conn:` does NOT close the connection
+    # — the sqlite3 connection context manager only commits/rolls back the
+    # transaction. Every caller MUST wrap this in `contextlib.closing(...)`
+    # (stacked with `conn` itself where transaction semantics are also
+    # needed) or the file descriptor leaks until GC happens to collect it.
     p = _resolve_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p, timeout=5.0)
@@ -163,7 +169,7 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
 
 def _init_sync(path: Path | None = None) -> None:
     p = _resolve_path(path)
-    with _connect(p) as conn:
+    with closing(_connect(p)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS schedules (
@@ -260,7 +266,7 @@ async def list_all(path: Path | None = None) -> list[Schedule]:
 def _list_sync(path: Path) -> list[Schedule]:
     if not path.exists():
         return []
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn:
         rows = conn.execute(
             "SELECT * FROM schedules ORDER BY created_at DESC"
         ).fetchall()
@@ -274,7 +280,7 @@ async def get(id: str, path: Path | None = None) -> Schedule | None:
 def _get_sync(id: str, path: Path) -> Schedule | None:
     if not path.exists():
         return None
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn:
         row = conn.execute("SELECT * FROM schedules WHERE id = ?", (id,)).fetchone()
     return _row_to_schedule(row) if row else None
 
@@ -306,7 +312,7 @@ async def create(
 
 
 def _insert_sync(s: Schedule, path: Path) -> None:
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         conn.execute(
             """
             INSERT INTO schedules (
@@ -349,7 +355,7 @@ def _update_sync(
 ) -> Schedule | None:
     if not path.exists():
         return None
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         row = conn.execute("SELECT * FROM schedules WHERE id = ?", (id,)).fetchone()
         if row is None:
             return None
@@ -445,7 +451,7 @@ def _upsert_device_sync(
     token: str, platform: str, bundle_id: str, environment: str, path: Path
 ) -> Device:
     now = time.time()
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         existing = conn.execute(
             "SELECT * FROM devices WHERE token = ?", (token,)
         ).fetchone()
@@ -482,7 +488,7 @@ async def delete_device(token: str, path: Path | None = None) -> bool:
 def _delete_device_sync(token: str, path: Path) -> bool:
     if not path.exists():
         return False
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         cur = conn.execute("DELETE FROM devices WHERE token = ?", (token,))
         conn.commit()
         return cur.rowcount > 0
@@ -495,7 +501,7 @@ async def list_devices(path: Path | None = None) -> list[Device]:
 def _list_devices_sync(path: Path) -> list[Device]:
     if not path.exists():
         return []
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn:
         rows = conn.execute("SELECT * FROM devices").fetchall()
     return [_device_row(r) for r in rows]
 
@@ -503,7 +509,7 @@ def _list_devices_sync(path: Path) -> list[Device]:
 def _delete_sync(id: str, path: Path) -> bool:
     if not path.exists():
         return False
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         cur = conn.execute("DELETE FROM schedules WHERE id = ?", (id,))
         conn.commit()
         return cur.rowcount > 0
@@ -519,7 +525,7 @@ async def _fetch_due(now: float, path: Path | None = None) -> list[Schedule]:
 def _fetch_due_sync(now: float, path: Path) -> list[Schedule]:
     if not path.exists():
         return []
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn:
         rows = conn.execute(
             "SELECT * FROM schedules WHERE enabled = 1 AND next_fire_at <= ?",
             (now,),
@@ -559,7 +565,7 @@ def _mark_fired_sync(
     assistant_text: str | None = None,
     completed_at: float | None = None,
 ) -> None:
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn, conn:
         row = conn.execute("SELECT * FROM schedules WHERE id = ?", (id,)).fetchone()
         if row is None:
             return
@@ -643,7 +649,7 @@ def _list_fire_events_sync(
 ) -> list[ScheduleFireEvent]:
     if not path.exists():
         return []
-    with _connect(path) as conn:
+    with closing(_connect(path)) as conn:
         rows = conn.execute(
             """
             SELECT * FROM schedule_fire_events
