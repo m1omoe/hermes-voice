@@ -324,6 +324,51 @@ struct HermesVoiceAPI {
         try Self.ensureOK(response, data: data)
     }
 
+    // MARK: - Schedule fires (sync feed replacing APNs — local-notifications-spec)
+
+    /// One recorded scheduled-fire result, as returned by
+    /// `GET /api/schedule-fires`. `seq` is the poll cursor: monotonic,
+    /// harness-agnostic, and append-only server-side, so it survives a
+    /// schedule rename/deletion (unlike the old mutable-row `last_fired_at`).
+    struct ScheduleFireEvent: Decodable, Identifiable, Equatable, Sendable {
+        var id: Int { seq }
+        let seq: Int
+        let fireId: String
+        let scheduleId: String
+        let displayName: String?
+        let harnessId: String
+        let sessionId: String?
+        let preview: String
+        let fullText: String
+        let completedAt: Double
+
+        enum CodingKeys: String, CodingKey {
+            case seq
+            case fireId = "fire_id"
+            case scheduleId = "schedule_id"
+            case displayName = "display_name"
+            case harnessId = "harness_id"
+            case sessionId = "session_id"
+            case preview
+            case fullText = "full_text"
+            case completedAt = "completed_at"
+        }
+    }
+
+    /// Cursor-paged fetch of fire events newer than `after`, oldest first.
+    /// `after` should be the highest `seq` already delivered for the
+    /// profile (0 to fetch from the beginning).
+    func listScheduleFires(after: Int, limit: Int = 50) async throws -> [ScheduleFireEvent] {
+        let url = try buildURL("/api/schedule-fires?after=\(after)&limit=\(limit)")
+        let (data, response) = try await perform(URLRequest(url: url))
+        try Self.ensureOK(response, data: data)
+        do {
+            return try Self.decoder.decode([ScheduleFireEvent].self, from: data)
+        } catch {
+            throw APIError.decode(error)
+        }
+    }
+
     // MARK: - Devices (Phase B push registration)
 
     struct DeviceResponse: Decodable {
@@ -835,3 +880,14 @@ struct HermesVoiceAPI {
         }
     }
 }
+
+/// The single schedule-fire-sync method `FirePoller` depends on — mirrors
+/// `TurnTransport`'s pattern: NARROW (one method), so `FirePoller`'s poll
+/// loop can be driven by a fake in tests instead of real networking.
+/// Conformance is an empty extension since `HermesVoiceAPI.listScheduleFires`
+/// already matches this signature exactly.
+protocol FireFeed: Sendable {
+    func listScheduleFires(after: Int, limit: Int) async throws -> [HermesVoiceAPI.ScheduleFireEvent]
+}
+
+extension HermesVoiceAPI: FireFeed {}

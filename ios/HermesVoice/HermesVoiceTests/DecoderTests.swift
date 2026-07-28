@@ -133,6 +133,57 @@ final class DecoderTests: XCTestCase {
         XCTAssertEqual(tc, HermesVoiceAPI.ToolCall(name: "edit", preview: "swap line", ok: true))
     }
 
+    // MARK: ScheduleFireEvent
+
+    /// A realistic `/api/schedule-fires` page: two fires, one carrying every
+    /// optional field, one with `display_name`/`session_id` both null (the
+    /// shape an un-named schedule or a harness that never opened a session
+    /// produces).
+    func testScheduleFireEventListMapping() throws {
+        let json = """
+        [
+          {
+            "seq": 1,
+            "fire_id": "fire-abc",
+            "schedule_id": "sched-1",
+            "display_name": "Morning briefing",
+            "harness_id": "claude",
+            "session_id": "sess-9",
+            "preview": "Good morning! Here's...",
+            "full_text": "Good morning! Here's the full digest text.",
+            "completed_at": 1700000000.5
+          },
+          {
+            "seq": 2,
+            "fire_id": "fire-def",
+            "schedule_id": "sched-2",
+            "display_name": null,
+            "harness_id": "hermes",
+            "session_id": null,
+            "preview": "Reminder",
+            "full_text": "Reminder: check the deploy.",
+            "completed_at": 1700000100.0
+          }
+        ]
+        """
+        let events = try decode([HermesVoiceAPI.ScheduleFireEvent].self, json)
+        XCTAssertEqual(events.count, 2)
+
+        XCTAssertEqual(events[0].seq, 1)
+        XCTAssertEqual(events[0].id, 1)
+        XCTAssertEqual(events[0].fireId, "fire-abc")
+        XCTAssertEqual(events[0].scheduleId, "sched-1")
+        XCTAssertEqual(events[0].displayName, "Morning briefing")
+        XCTAssertEqual(events[0].harnessId, "claude")
+        XCTAssertEqual(events[0].sessionId, "sess-9")
+        XCTAssertEqual(events[0].preview, "Good morning! Here's...")
+        XCTAssertEqual(events[0].fullText, "Good morning! Here's the full digest text.")
+        XCTAssertEqual(events[0].completedAt, 1700000000.5)
+
+        XCTAssertNil(events[1].displayName)
+        XCTAssertNil(events[1].sessionId)
+    }
+
     // MARK: parseEvent (SSE)
 
     private func parse(_ json: String) -> HermesVoiceAPI.TurnEvent? {
