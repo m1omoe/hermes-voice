@@ -298,3 +298,18 @@
 1. **The Claude launchd PATH fix becomes P0.** `ClaudeAdapter` resolves the binary with a bare `shutil.which("claude")` (`adapters/claude.py:362-371`) while the provisioner embeds no Claude path and no usable `PATH`. That was an optional-harness bug; with Claude as the default it breaks the **default** experience after setup or reboot.
 2. **The provisioner's pre-mutation readiness gate validates the wrong harness.** `_require_hermes_model` (`provision_macos.py:848`, called at `:1013,1032`) proves *Hermes* can infer before any machine change (`[2026-07-25]`). It must validate the configured default, or setup will happily provision a Mac whose default harness cannot run a turn.
 3. Further vindicates the constrained freeze over a moratorium (`[2026-07-27]`): both fixes require provisioner changes.
+
+## [2026-07-28] Treat the launchd environment as hostile, and probe service health rather than process liveness
+
+**Context**: Two production-only failures in one day, both invisible in development, both caused by the LaunchAgent's environment differing from an interactive shell.
+
+1. `ClaudeAdapter` resolved its binary with a bare `shutil.which("claude")`. launchd's minimal `PATH` contains neither `/opt/homebrew/bin` nor `~/.local/bin`, so setup succeeded in the operator's shell and the *default* harness was unreachable once the backend ran as a service (fixed in `de14cfc`).
+2. The backend stopped serving after ~18h with 326 open file descriptors against a launchd soft limit of **256** (`launchctl limit maxfiles`), while an interactive shell allows 1048576. Exhausted descriptors made `accept()` fail with `EMFILE`, so the listening socket stayed up and every connection was reset. Root cause was that `with sqlite3.connect(...) as conn:` commits the transaction but does **not** close the connection, leaking one per call across 18 sites (fixed in `d7976e9`).
+
+**Decision**: Treat the launchd runtime as a distinct, more restrictive environment than any developer shell. Anything the backend depends on from its environment — executable paths, resource limits, credentials — must be resolved explicitly and carried into the service configuration, never inherited or assumed. Additionally, service health is to be judged by an HTTP probe, not by process liveness.
+
+**Alternatives considered**: Raise the descriptor limit in the plist (treats the symptom; the leak would still exhaust any limit). Rely on `KeepAlive` for recovery — rejected: it is why this went unnoticed for 18 hours. The process never exited, so launchd saw a healthy job the entire time; it had simply stopped answering.
+
+**Rationale**: Both failures share one shape — something true in development is false under launchd, and nothing in the pipeline tests the launchd case. Unit tests pass, an interactive run works, and only the installed service breaks. Explicit resolution removes the class rather than each instance. The health-probe point is separate and equally important: `KeepAlive` detects *exit*, and the failure mode that actually occurred was a live process that answered nothing, which no process-liveness check can catch.
+
+**Follow-ups**: add a health-probe watchdog (a periodic authenticated `/health` check that restarts the agent on repeated failure); consider raising `maxfiles` in the plist as defence in depth once the leak fix has soaked; extend clean-Mac acceptance (Phase C) to include a reboot and a soak long enough to surface descriptor growth, since neither of these bugs was reachable by the test suite.
