@@ -216,6 +216,17 @@ def _init_sync(path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS schedule_fire_events_schedule_id
               ON schedule_fire_events(schedule_id);
+
+            -- fire_id is UNIQUE by index rather than by column constraint:
+            -- sqlite cannot ALTER a table to add a constraint, but a unique
+            -- index is additive and so lands on databases created before this
+            -- line existed — the same reason the table itself needs no
+            -- migration. Uniqueness is load-bearing: iOS builds its
+            -- notification identifier as scheduleId-fireId, and that is what
+            -- makes the poller's deliberate redelivery coalesce instead of
+            -- notifying twice. `seq` remains the only cursor identity.
+            CREATE UNIQUE INDEX IF NOT EXISTS schedule_fire_events_fire_id
+              ON schedule_fire_events(fire_id);
             """
         )
         conn.commit()
@@ -721,11 +732,20 @@ async def _fire_one(app: FastAPI, sched: Schedule) -> None:
                 logger.warning("push failed for schedule=%s: %s", sched.id, e)
     except Exception as e:
         # "Skip silently" per the spec — log but no push, no alert.
+        #
+        # Mark first, then log the count the row ACTUALLY holds. `sched` is a
+        # detached snapshot taken by _fetch_due at tick time, so
+        # `sched.consecutive_fails + 1` could disagree with the persisted
+        # value (_mark_fired_sync re-reads the live row). The write was always
+        # right; the log was not — and this line is what an operator reads
+        # while diagnosing an outage, so it has to be true.
+        await _mark_fired(sched.id, fired_at, success=False)
+        current = await get(sched.id, path=None)
+        fails = current.consecutive_fails if current else sched.consecutive_fails + 1
         logger.warning(
             "schedule failed id=%s err=%s (fails=%d/%d)",
-            sched.id, e, sched.consecutive_fails + 1, MAX_CONSECUTIVE_FAILS,
+            sched.id, e, fails, MAX_CONSECUTIVE_FAILS,
         )
-        await _mark_fired(sched.id, fired_at, success=False)
     finally:
         _in_flight.discard(sched.id)
 

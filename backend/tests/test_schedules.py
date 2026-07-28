@@ -732,3 +732,62 @@ async def test_send_push_skipped_when_key_file_missing(
         session_id="sess-y",
     )
     assert sent == 0
+
+
+@pytest.mark.asyncio
+async def test_fire_id_is_unique(temp_db: Path) -> None:
+    """iOS derives its notification identifier from scheduleId-fireId, and
+    that identifier is what makes the poller's deliberate redelivery coalesce
+    instead of notifying twice. A duplicate fire_id would break that, so the
+    guarantee is enforced by the database rather than by convention."""
+    import sqlite3
+
+    await schedules.init_store(temp_db)
+    s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
+
+    async def fire(fire_id: str) -> None:
+        await schedules._mark_fired(
+            s.id, time.time(), success=True, path=temp_db,
+            fire_id=fire_id, display_name=s.display_name, harness_id="hermes",
+            session_id=None, assistant_text="ok", completed_at=time.time(),
+        )
+
+    await fire("dupe")
+    with pytest.raises(sqlite3.IntegrityError):
+        await fire("dupe")
+
+
+@pytest.mark.asyncio
+async def test_unique_fire_id_index_lands_on_a_pre_existing_db(tmp_path: Path) -> None:
+    """The index must reach databases created before it existed — sqlite
+    cannot ALTER in a constraint, which is exactly why this is an index."""
+    import sqlite3
+
+    db_path = tmp_path / "older.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schedule_fire_events (
+              seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+              fire_id       TEXT    NOT NULL,
+              schedule_id   TEXT    NOT NULL,
+              display_name  TEXT,
+              harness_id    TEXT    NOT NULL,
+              session_id    TEXT,
+              preview       TEXT    NOT NULL,
+              full_text     TEXT    NOT NULL,
+              completed_at  REAL    NOT NULL
+            );
+            """
+        )
+        conn.commit()
+
+    schedules._init_sync(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        indexes = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "schedule_fire_events_fire_id" in indexes
