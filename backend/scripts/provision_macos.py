@@ -896,6 +896,15 @@ class MacProvisioner:
                 "to an executable and try again"
             )
         resolved_hermes_path = Path(resolved_hermes).expanduser().resolve()
+        # Optional: a Hermes-only machine has no Claude. Resolve it here, while
+        # we still have the operator's interactive PATH, because the LaunchAgent
+        # will not have one. Claude is the default harness as of
+        # decisions.md [2026-07-27], so a bare PATH lookup at service start is
+        # what strands it after setup or reboot.
+        resolved_claude = cls._which(runner, "claude")
+        resolved_claude_path = (
+            Path(resolved_claude).expanduser().resolve() if resolved_claude else None
+        )
         tailscale = cls._which(runner, "tailscale")
         if tailscale is None and TAILSCALE_APP_PATH.is_file():
             tailscale = str(TAILSCALE_APP_PATH)
@@ -913,6 +922,7 @@ class MacProvisioner:
             hermes_bin=resolved_hermes_path,
             dns_name=dns_name,
             support_dir=home / "Library/Application Support/Harness Voice",
+            claude_bin=resolved_claude_path,
         )
 
     def setup(self, *, from_bws: bool = False, from_bws_child: bool = False) -> None:

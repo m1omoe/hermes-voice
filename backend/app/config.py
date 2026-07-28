@@ -96,6 +96,12 @@ class Settings:
     # ignores workspace/sandbox; the others are cwd-scoped coding agents that run
     # in a shared workspace under a sandbox.
     default_harness: str = "hermes"
+    # Absolute path to the `claude` binary. Empty means "resolve on PATH".
+    # launchd gives a service a minimal PATH that excludes /opt/homebrew/bin and
+    # ~/.local/bin, so a bare `claude` lookup succeeds in an interactive shell
+    # during setup and then fails once the backend runs as a LaunchAgent. The
+    # provisioner resolves and exports this the same way it does HERMES_BIN.
+    claude_bin: str = ""
     harness_workspace_dir: str = ""
     harness_sandbox: str = "workspace-write"
     # Slugs (working-dir fragments) to hide from the Claude session picker — e.g.
@@ -146,6 +152,7 @@ def get_settings() -> Settings:
         hermes_extra_args=tuple(extra),
         use_acp=_bool("HERMES_USE_ACP", default=True),
         default_harness=_env("HARNESS_DEFAULT", default="hermes"),
+        claude_bin=_env("CLAUDE_BIN", default=""),
         harness_workspace_dir=_env(
             "HARNESS_WORKSPACE_DIR",
             default=str(Path.home() / ".harness-voice" / "workspace"),

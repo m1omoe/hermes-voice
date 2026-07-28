@@ -366,6 +366,14 @@ class ClaudeAdapter:
 
     def __init__(self, settings: Settings):
         self._settings = settings
+        # An absolute path from CLAUDE_BIN shadows the class default for every
+        # `self.bin` read below. launchd hands a LaunchAgent a minimal PATH with
+        # neither /opt/homebrew/bin nor ~/.local/bin, so a bare lookup resolves
+        # during interactive setup and then fails once the backend is a service
+        # — which strands the DEFAULT harness (decisions.md [2026-07-27]).
+        # shutil.which() accepts an absolute path, so is_available() still works.
+        if settings.claude_bin:
+            self.bin = settings.claude_bin
 
     def is_available(self) -> bool:
         return shutil.which(self.bin) is not None

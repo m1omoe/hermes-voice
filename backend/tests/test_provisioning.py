@@ -4,6 +4,7 @@ import os
 import plistlib
 import shlex
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2367,3 +2368,44 @@ def test_pair_refuses_when_authenticated_hermes_listing_has_no_hermes(
     assert runner.harnesses_calls == 31
     assert runner.harnesses_tokens == ["public-token"] * 31
 
+
+
+def make_layout_with_claude(tmp_path: Path) -> MacServerLayout:
+    layout = make_layout(tmp_path)
+    return replace(layout, claude_bin=Path("/opt/homebrew/bin/claude"))
+
+
+def test_backend_assets_export_claude_bin_when_claude_is_installed(
+    tmp_path: Path,
+) -> None:
+    """launchd gives a service a minimal PATH with neither /opt/homebrew/bin nor
+    ~/.local/bin, so a bare `claude` lookup resolves during interactive setup and
+    then fails once the backend runs as a LaunchAgent — stranding the DEFAULT
+    harness (decisions.md [2026-07-27]). Both assets must carry the absolute
+    path, exactly as they already do for HERMES_BIN."""
+    layout = make_layout_with_claude(tmp_path)
+
+    rendered = render_backend_wrapper(layout)
+    assert f"CLAUDE_BIN={shlex.quote(str(layout.claude_bin))}" in rendered
+
+    env = load_plist(
+        render_backend_plist(layout, layout.support_dir / "run-backend")
+    )["EnvironmentVariables"]
+    assert env["CLAUDE_BIN"] == str(layout.claude_bin)
+    # The Hermes path must be unaffected.
+    assert env["HERMES_BIN"] == str(layout.hermes_bin)
+
+
+def test_backend_assets_omit_claude_bin_on_a_hermes_only_machine(
+    tmp_path: Path,
+) -> None:
+    """Claude is optional. With none installed the variable is absent entirely
+    rather than empty, so the backend falls back to a PATH lookup."""
+    layout = make_layout(tmp_path)
+    assert layout.claude_bin is None
+
+    assert "CLAUDE_BIN" not in render_backend_wrapper(layout)
+    env = load_plist(
+        render_backend_plist(layout, layout.support_dir / "run-backend")
+    )["EnvironmentVariables"]
+    assert "CLAUDE_BIN" not in env
