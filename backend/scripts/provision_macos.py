@@ -37,6 +37,9 @@ LAUNCHCTL_BOOTOUT_POLL_INTERVAL = 0.25
 TAILSCALE_APP_PATH = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 LEGACY_BACKEND_LABEL = "dev.finklea.harnessvoice.backend"
 RENEWAL_LABEL = "io.harnessvoice.cert-renew"
+# Must track backend/app/config.py Settings.default_harness — the gate below
+# validates whichever harness will actually back a turn.
+DEFAULT_HARNESS = "claude"
 
 
 @dataclass(frozen=True)
@@ -844,6 +847,65 @@ class MacProvisioner:
         self.output = output
         self.tailscale = tailscale
 
+    def _require_default_harness_ready(
+        self, hermes_bin: Path, claude_bin: Path | None
+    ) -> None:
+        """Validate the harness that will actually back a turn.
+
+        The gate previously always probed Hermes. Since decisions.md
+        [2026-07-27] the backend default is Claude, so proving Hermes works
+        said nothing about whether the machine could serve a turn — setup
+        would happily bless a Mac whose default harness was unusable, which
+        is the exact failure this gate exists to prevent.
+
+        Resolution mirrors `create_app`: honour HARNESS_DEFAULT, else the
+        backend's own default, and fall back to Hermes when the requested
+        harness is unavailable (a Claude-less Mac is a supported setup).
+        """
+        requested = (self.env.get("HARNESS_DEFAULT") or DEFAULT_HARNESS).strip()
+        if requested == "claude" and claude_bin is not None:
+            self._require_claude_ready(self.runner, claude_bin)
+            return
+        self._require_hermes_model(self.runner, hermes_bin)
+
+    @staticmethod
+    def _require_claude_ready(runner: CommandRunner, claude_bin: Path) -> None:
+        """Prove Claude can actually run a turn before we mutate the machine.
+
+        Mirrors `_require_hermes_model`'s rationale (decisions.md
+        [2026-07-25]): binary presence proves nothing — an unauthenticated or
+        expired provider passes every config check and then fails the user's
+        first voice turn. Only a real inference catches that.
+
+        `--safe-mode` is the counterpart of Hermes's: it disables CLAUDE.md,
+        skills, plugins, hooks, MCP servers and custom agents, so a broken
+        user configuration cannot fail (or hang) a probe that is only meant to
+        answer "is this harness usable". It also keeps the probe cheap — with
+        project context loaded the same call costs roughly 4x more.
+
+        `--permission-mode plan` cannot edit anything, preserving the
+        pre-confirmation no-mutation boundary. `input=""` closes stdin: the
+        CLI warns and stalls waiting on stdin otherwise.
+        """
+        ready = runner.run(
+            [
+                str(claude_bin),
+                "--safe-mode",
+                "-p",
+                "Reply with exactly: OK",
+                "--permission-mode",
+                "plan",
+                "--output-format",
+                "json",
+            ],
+            input="",
+        )
+        if ready.returncode != 0 or not ready.stdout.strip():
+            raise ProvisioningError(
+                "Claude is not ready; run `claude` once to sign in, then try "
+                "again (or set HARNESS_DEFAULT=hermes to default to Hermes)"
+            )
+
     @staticmethod
     def _require_hermes_model(runner: CommandRunner, hermes_bin: Path) -> None:
         configured = runner.run(
@@ -1020,7 +1082,7 @@ class MacProvisioner:
                 platform_name=self.platform_name,
                 hermes_bin=requested_hermes,
             )
-            self._require_hermes_model(self.runner, layout.hermes_bin)
+            self._require_default_harness_ready(layout.hermes_bin, layout.claude_bin)
             tailscale = self._find_tailscale()
             return layout, tailscale
 
@@ -1039,7 +1101,7 @@ class MacProvisioner:
         else:
             uv = str(layout.uv)
             hermes_bin = layout.hermes_bin
-        self._require_hermes_model(self.runner, hermes_bin)
+        self._require_default_harness_ready(hermes_bin, layout.claude_bin)
         tailscale = self._find_tailscale()
         dns_name = self._normalize_dns(layout.dns_name)
         if not dns_name:

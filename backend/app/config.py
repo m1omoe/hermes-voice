@@ -95,7 +95,13 @@ class Settings:
     # and where/how the coding harnesses (claude/codex/opencode) run. Hermes
     # ignores workspace/sandbox; the others are cwd-scoped coding agents that run
     # in a shared workspace under a sandbox.
-    default_harness: str = "hermes"
+    # Claude, not Hermes, per decisions.md [2026-07-27]: Hermes's quality
+    # levers lived in local hermes-agent patches that a Homebrew upgrade
+    # destroyed and that public users would never have had, while Claude's
+    # shaping rides on the stock --append-system-prompt flag and is therefore
+    # reproducible on any machine. An unavailable default falls back to hermes
+    # in create_app, so a Claude-less Mac still works.
+    default_harness: str = "claude"
     # Absolute path to the `claude` binary. Empty means "resolve on PATH".
     # launchd gives a service a minimal PATH that excludes /opt/homebrew/bin and
     # ~/.local/bin, so a bare `claude` lookup succeeds in an interactive shell
@@ -151,7 +157,7 @@ def get_settings() -> Settings:
         hermes_timeout=int(_env("HERMES_TIMEOUT_SECONDS", default="300")),
         hermes_extra_args=tuple(extra),
         use_acp=_bool("HERMES_USE_ACP", default=True),
-        default_harness=_env("HARNESS_DEFAULT", default="hermes"),
+        default_harness=_env("HARNESS_DEFAULT", default="claude"),
         claude_bin=_env("CLAUDE_BIN", default=""),
         harness_workspace_dir=_env(
             "HARNESS_WORKSPACE_DIR",

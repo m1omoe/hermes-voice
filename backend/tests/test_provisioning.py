@@ -384,6 +384,7 @@ class FakeRunner:
             if harnesses_body is not None
             else [{"id": "hermes", "name": "Hermes", "available": True}]
         )
+        self.claude_readiness = CommandResult(0, '{"is_error":false}', "")
         self.health_calls = 0
         self.harnesses_calls = 0
         self.harnesses_tokens: list[str] = []
@@ -414,6 +415,8 @@ class FakeRunner:
             return self.hermes_model
         if args[1:5] == ["--safe-mode", "--toolsets", "context_engine", "--model"]:
             return self.hermes_readiness
+        if args[1:3] == ["--safe-mode", "-p"]:
+            return self.claude_readiness
         if args[1:] == ["serve", "status", "--json"]:
             if not self.serve_statuses:
                 raise AssertionError("unexpected extra Tailscale Serve status check")
@@ -2409,3 +2412,93 @@ def test_backend_assets_omit_claude_bin_on_a_hermes_only_machine(
         render_backend_plist(layout, layout.support_dir / "run-backend")
     )["EnvironmentVariables"]
     assert "CLAUDE_BIN" not in env
+
+
+def _argvs(runner: FakeRunner) -> list[list[str]]:
+    return [args for args, _env, _input in runner.calls]
+
+
+def test_readiness_gate_probes_claude_when_it_is_the_default(tmp_path: Path) -> None:
+    """The gate proves the machine can serve a turn before anything is
+    mutated. It always probed Hermes, so once decisions.md [2026-07-27] made
+    Claude the default it was proving the wrong thing — setup could bless a
+    Mac whose default harness was unusable."""
+    runner = FakeRunner()
+    provisioner = MacProvisioner(
+        layout=make_layout_with_claude(tmp_path), runner=runner, env={}
+    )
+
+    provisioner._require_default_harness_ready(
+        Path("/usr/local/bin/hermes"), Path("/opt/homebrew/bin/claude")
+    )
+
+    probes = [a for a in _argvs(runner) if a and "claude" in a[0]]
+    assert probes, "the default harness (claude) was never probed"
+    argv = probes[0]
+    assert "--safe-mode" in argv, "must not load user CLAUDE.md/MCP/plugins"
+    assert "-p" in argv, "without -p the CLI opens a TTY and hangs headless"
+    assert argv[argv.index("--permission-mode") + 1] == "plan", "probe must not edit"
+    assert not any("hermes" in part for part in argv)
+
+
+def test_claude_probe_closes_stdin(tmp_path: Path) -> None:
+    """The CLI stalls waiting on stdin when it is left open — a documented
+    hang for every harness in AGENTS.md."""
+    runner = FakeRunner()
+    provisioner = MacProvisioner(
+        layout=make_layout_with_claude(tmp_path), runner=runner, env={}
+    )
+
+    provisioner._require_default_harness_ready(
+        Path("/usr/local/bin/hermes"), Path("/opt/homebrew/bin/claude")
+    )
+
+    claude_calls = [c for c in runner.calls if c[0] and "claude" in c[0][0]]
+    assert claude_calls[0][2] == "", "stdin must be closed for the probe"
+
+
+def test_readiness_gate_fails_closed_when_claude_cannot_run(tmp_path: Path) -> None:
+    """An installed but unauthenticated Claude is exactly the case a binary
+    check misses and this gate exists to catch."""
+    runner = FakeRunner()
+    runner.claude_readiness = CommandResult(1, "", "not logged in")
+    provisioner = MacProvisioner(
+        layout=make_layout_with_claude(tmp_path), runner=runner, env={}
+    )
+
+    with pytest.raises(ProvisioningError):
+        provisioner._require_default_harness_ready(
+            Path("/usr/local/bin/hermes"), Path("/opt/homebrew/bin/claude")
+        )
+
+
+def test_readiness_gate_falls_back_to_hermes_without_claude(tmp_path: Path) -> None:
+    """A Hermes-only Mac is supported: with no claude resolved the gate must
+    validate Hermes rather than skip validation entirely."""
+    runner = FakeRunner()
+    provisioner = MacProvisioner(layout=make_layout(tmp_path), runner=runner, env={})
+
+    provisioner._require_default_harness_ready(Path("/usr/local/bin/hermes"), None)
+
+    argvs = _argvs(runner)
+    assert any(a and "hermes" in a[0] for a in argvs), "Hermes was not probed"
+    assert not any(a and "claude" in a[0] for a in argvs)
+
+
+def test_readiness_gate_honours_harness_default_override(tmp_path: Path) -> None:
+    """HARNESS_DEFAULT=hermes must probe Hermes even where claude exists — the
+    gate has to mirror what create_app actually resolves."""
+    runner = FakeRunner()
+    provisioner = MacProvisioner(
+        layout=make_layout_with_claude(tmp_path),
+        runner=runner,
+        env={"HARNESS_DEFAULT": "hermes"},
+    )
+
+    provisioner._require_default_harness_ready(
+        Path("/usr/local/bin/hermes"), Path("/opt/homebrew/bin/claude")
+    )
+
+    argvs = _argvs(runner)
+    assert any(a and "hermes" in a[0] for a in argvs)
+    assert not any(a and "claude" in a[0] for a in argvs)
