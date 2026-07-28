@@ -63,6 +63,23 @@ FIRE_PREVIEW_CHARS = 200
 
 # Bounded retention: keep only the newest N fire events per schedule so the
 # table doesn't grow forever. Pruned on every insert.
+#
+# This DOES mean a client that stops polling long enough can miss intermediate
+# events: at the 60s cadence floor a schedule fires ~480x overnight, so with
+# background refresh suppressed (Low Power Mode, force-quit) everything but the
+# newest N is pruned before the phone next looks.
+#
+# That is acceptable, and deliberately so: the client collapses to
+# latest-per-schedule anyway (see phases/local-notifications-spec.md), and it
+# cannot be stranded — the cursor is `seq > after`, so a client holding an old
+# cursor still receives every surviving row and still notifies for the newest.
+# The user loses intermediate history they would never have been shown.
+#
+# The consequence to preserve: a client must NEVER treat this feed as a
+# complete history. Do not build "you missed N runs" counting, gap detection,
+# or anything else assuming continuity on top of it without first adding an
+# explicit gap signal — the feed cannot currently distinguish "nothing fired"
+# from "older events were pruned".
 MAX_FIRE_EVENTS_PER_SCHEDULE = 50
 
 

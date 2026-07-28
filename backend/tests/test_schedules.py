@@ -194,6 +194,15 @@ async def test_mark_fired_success_requires_event_fields(temp_db: Path) -> None:
     with pytest.raises(ValueError):
         await schedules._mark_fired(s.id, time.time(), success=True, path=temp_db)
 
+    # Raising is not the point — leaving NOTHING written is. Asserting only
+    # pytest.raises would pass against an implementation that marked the
+    # schedule fired and then raised, i.e. exactly the "completed schedule with
+    # no fire event" state this invariant exists to make impossible.
+    updated = await schedules.get(s.id, temp_db)
+    assert updated is not None
+    assert updated.last_fired_at is None
+    assert await schedules.list_fire_events(path=temp_db) == []
+
 
 @pytest.mark.asyncio
 async def test_failures_disable_after_max(temp_db: Path) -> None:
@@ -319,17 +328,23 @@ async def test_fired_at_captured_after_semaphore_not_before(
     """fired_at (and therefore next_fire_at) must be measured after the
     semaphore is acquired, not at _fire_one's invocation — otherwise time
     spent queued behind MAX_CONCURRENT_FIRES silently shortens the next
-    interval. Swap in a fake semaphore with a slow __aenter__ to simulate that
-    queue delay deterministically."""
+    interval.
 
-    class SlowGate:
+    Gated on an explicit asyncio.Event rather than a sleep: a wall-clock
+    threshold is a latent flake on a loaded runner, and a fixed sleep proves
+    only ordering, not a realistic queue. Here the fire cannot proceed until
+    the test releases it, so `released` is a hard lower bound."""
+
+    gate = asyncio.Event()
+
+    class GatedSema:
         async def __aenter__(self):
-            await asyncio.sleep(0.1)
+            await gate.wait()
 
         async def __aexit__(self, *exc):
             return False
 
-    monkeypatch.setattr(schedules, "_fire_sema", SlowGate())
+    monkeypatch.setattr(schedules, "_fire_sema", GatedSema())
 
     await schedules.init_store(temp_db)
     s = await schedules.create(cadence_seconds=60, prompt="hi", path=temp_db)
@@ -338,13 +353,20 @@ async def test_fired_at_captured_after_semaphore_not_before(
     app = client.app
 
     before = time.time()
-    await schedules._fire_one(app, s)
+    task = asyncio.create_task(schedules._fire_one(app, s))
+    await asyncio.sleep(0)  # let the fire reach the gate and block there
+    released = time.time()
+    gate.set()
+    await task
 
     updated = await schedules.get(s.id, temp_db)
     assert updated is not None and updated.last_fired_at is not None
-    # The fix: fired_at reflects time AFTER the ~0.1s semaphore wait. Before
-    # the fix, fired_at was captured at `before` and this would fail.
-    assert updated.last_fired_at - before >= 0.05
+    # Deterministic: fired_at was taken after the gate opened, so it cannot
+    # precede `released`. Capturing it at _fire_one entry (the old bug) would
+    # place it at `before`, ahead of the gate, and fail this.
+    assert updated.last_fired_at >= released
+    assert updated.next_fire_at == pytest.approx(updated.last_fired_at + 60)
+    assert before <= released
 
 
 # ───────────────────── Fire events (schedule sync) ─────────────────────
@@ -480,6 +502,39 @@ async def test_fire_events_retention_prunes_oldest(temp_db: Path) -> None:
     # Oldest pruned, newest retained.
     assert "fire-0" not in fire_ids
     assert f"fire-{total - 1}" in fire_ids
+
+
+@pytest.mark.asyncio
+async def test_retention_prunes_per_schedule_not_globally(temp_db: Path) -> None:
+    """Retention is scoped `WHERE schedule_id = ?`. Dropping that filter from
+    the subquery is an easy refactor slip — the outer WHERE already reads as
+    sufficient — and it would prune OTHER schedules' history while every
+    single-schedule retention test stayed green. Two schedules, one busy."""
+    await schedules.init_store(temp_db)
+    busy = await schedules.create(cadence_seconds=60, prompt="busy", path=temp_db)
+    quiet = await schedules.create(cadence_seconds=60, prompt="quiet", path=temp_db)
+
+    await schedules._mark_fired(
+        quiet.id, time.time(), success=True, path=temp_db,
+        fire_id="quiet-1", display_name=quiet.display_name, harness_id="hermes",
+        session_id=None, assistant_text="quiet result", completed_at=time.time(),
+    )
+
+    for i in range(schedules.MAX_FIRE_EVENTS_PER_SCHEDULE + 10):
+        await schedules._mark_fired(
+            busy.id, time.time(), success=True, path=temp_db,
+            fire_id=f"busy-{i}", display_name=busy.display_name,
+            harness_id="hermes", session_id=None,
+            assistant_text=f"busy-{i}", completed_at=time.time(),
+        )
+
+    events = await schedules.list_fire_events(limit=10_000, path=temp_db)
+    quiet_events = [e for e in events if e.schedule_id == quiet.id]
+    busy_events = [e for e in events if e.schedule_id == busy.id]
+
+    assert len(quiet_events) == 1, "a busy schedule pruned another's history"
+    assert quiet_events[0].fire_id == "quiet-1"
+    assert len(busy_events) == schedules.MAX_FIRE_EVENTS_PER_SCHEDULE
 
 
 def test_fire_events_table_created_on_pre_existing_db(tmp_path: Path) -> None:

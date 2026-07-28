@@ -748,6 +748,11 @@ def _register_routes(app: FastAPI) -> None:
         with the highest `seq` it has already seen and gets back only newer
         events, oldest first."""
         limit = max(1, min(limit, 200))
+        # Floor the cursor at 0. `seq` starts at 1, so an unclamped negative —
+        # a client that lost its cursor and fell back to a -1 sentinel — would
+        # match every retained row and silently re-deliver the whole table as
+        # "new", which is precisely what the cursor exists to prevent.
+        after = max(0, after)
         items = await schedules.list_fire_events(after=after, limit=limit)
         return [ScheduleFireEventResponse(**e.as_dict()) for e in items]
 
