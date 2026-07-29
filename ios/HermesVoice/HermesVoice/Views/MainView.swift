@@ -102,6 +102,19 @@ struct MainView: View {
                 if newPhase != .active && conversationMode.isActive {
                     conversationMode.stop()
                 }
+                // Schedule-fire sync's foreground entry point: an immediate
+                // poll plus a light repeating timer while active, across ALL
+                // profiles (see FireSyncCoordinator). Backgrounding also
+                // submits a BGAppRefreshTask request so the schedule keeps
+                // running while the app isn't open.
+                switch newPhase {
+                case .active:
+                    FireSyncCoordinator.shared.appDidBecomeActive()
+                case .background:
+                    FireSyncCoordinator.shared.appDidEnterBackground()
+                default:
+                    FireSyncCoordinator.shared.stopForegroundPolling()
+                }
             }
             .alert("Conversation mode", isPresented: Binding(
                 get: { conversationMode.errorMessage != nil },

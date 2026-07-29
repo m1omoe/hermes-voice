@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>dev.finklea.harnessvoice.firesync</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -29,12 +33,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSCameraUsageDescription</key>
-	<string>Harness Voice uses the camera only to scan a local server pairing QR code.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_harness-voice._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Harness Voice uses the camera only to scan a local server pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Harness Voice connects to your self-hosted backend over your local network or Tailscale to talk to your agent.</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -50,6 +54,7 @@
 	<array>
 		<string>audio</string>
 		<string>remote-notification</string>
+		<string>fetch</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

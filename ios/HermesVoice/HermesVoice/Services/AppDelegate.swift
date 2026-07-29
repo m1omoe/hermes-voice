@@ -10,6 +10,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions:
             [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Must happen before this method returns, or BGTaskScheduler throws.
+        // See `FireSyncCoordinator.registerBackgroundTask` for why this has
+        // no ordering dependency on `HermesVoiceApp.init()`'s
+        // `configure(settings:)`.
+        FireSyncCoordinator.shared.registerBackgroundTask()
         return true
     }
 

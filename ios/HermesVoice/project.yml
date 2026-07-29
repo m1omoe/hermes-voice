@@ -97,6 +97,13 @@ targets:
         UIBackgroundModes:
           - audio
           - remote-notification
+          - fetch
+        # Local-notifications-spec: one BGAppRefreshTask identifier for the
+        # schedule-fire sync poll. MUST match `FireSyncCoordinator
+        # .backgroundTaskIdentifier` in Swift — that constant is the single
+        # source of truth; `FireSyncCoordinatorTests` asserts the two agree.
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.finklea.harnessvoice.firesync
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
     settings:

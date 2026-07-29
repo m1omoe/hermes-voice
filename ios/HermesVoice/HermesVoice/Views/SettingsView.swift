@@ -142,6 +142,7 @@ struct SettingsView: View {
                             let granted = await NotificationManager.shared.requestAuthorization()
                             if granted {
                                 NotificationManager.shared.registerForRemoteNotifications()
+                                FireSyncCoordinator.shared.submitBackgroundTaskRequest()
                             } else {
                                 // User denied at the OS prompt — flip our toggle back
                                 // off so the UI matches the system state.

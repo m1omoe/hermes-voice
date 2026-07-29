@@ -18,6 +18,7 @@
 		1CE99ED4D8BB3006A3019C78 /* ServerPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ECF124CD9E6B41E78BF0F94 /* ServerPairing.swift */; };
 		218DF712A568866AAE836A91 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 248F1323DED3121D4CA9EFC0 /* TranscriptView.swift */; };
 		228AD5591AB5A775324DDCCA /* NotificationSwitchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCA835B2614A1721D08E847 /* NotificationSwitchTests.swift */; };
+		2910C8B4A9EE2575F38A8AC0 /* FireSyncCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EDADFB3EF44575BDBCE3E83 /* FireSyncCoordinatorTests.swift */; };
 		2B84FDCF95AE614F422952E7 /* HeroPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B966AD3C9F9B2FF70EA6E1 /* HeroPane.swift */; };
 		2ECCBBD3F53D223C3C92D5AF /* BackendProfileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB99AEA7FC9FA5F6CFA0A3C3 /* BackendProfileViews.swift */; };
 		30B85FE82907B70B78A1AEA0 /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C3B91E63B245A2FBFF59B48 /* MarkdownText.swift */; };
@@ -25,6 +26,7 @@
 		37340FF95EA27FD9CD48857F /* WatchMainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9810290C4737AC3EE5035FF /* WatchMainView.swift */; };
 		3A049B40F2E4A88A1765590A /* HermesVoiceWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37EDE32364962A2156475E57 /* HermesVoiceWidgetBundle.swift */; };
 		3D3CEBD0C0B5596F50E6E865 /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17443799D7DD2573C9C51F40 /* Message.swift */; };
+		3E83174477A54B55B8BA80BF /* FireSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 961846E67145383FBAA3A13A /* FireSyncCoordinator.swift */; };
 		46C818DC6D454855A645307D /* HermesVoiceAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E038B022A79A275C21BB70B /* HermesVoiceAPI.swift */; };
 		50AB90E3B58BF04A1B5B9D99 /* PushToTalkButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D27F3D268D95B51D59B300 /* PushToTalkButton.swift */; };
 		52AEC37A577BF637003CD5AC /* WatchRelayDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C36D308A903CCCF33283CB1 /* WatchRelayDecisionTests.swift */; };
@@ -150,6 +152,7 @@
 		248F1323DED3121D4CA9EFC0 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		2C36D308A903CCCF33283CB1 /* WatchRelayDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRelayDecisionTests.swift; sourceTree = "<group>"; };
 		2CF70CBF526FBB0F1037F2C6 /* speakable_cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = speakable_cases.json; sourceTree = "<group>"; };
+		2EDADFB3EF44575BDBCE3E83 /* FireSyncCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FireSyncCoordinatorTests.swift; sourceTree = "<group>"; };
 		2F5107EB40D7F7FFED269FED /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		31E0B10C0BD079320DCE92EC /* FillerVerbosityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FillerVerbosityTests.swift; sourceTree = "<group>"; };
 		33B966AD3C9F9B2FF70EA6E1 /* HeroPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroPane.swift; sourceTree = "<group>"; };
@@ -187,6 +190,7 @@
 		95073D71B1247389D55E2E90 /* ConversationViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationViewModel.swift; sourceTree = "<group>"; };
 		95166F0DE45E146EE32EB48C /* FillerPhrasesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FillerPhrasesTests.swift; sourceTree = "<group>"; };
 		9568F14525B3FC27BE22ABA1 /* DecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecoderTests.swift; sourceTree = "<group>"; };
+		961846E67145383FBAA3A13A /* FireSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FireSyncCoordinator.swift; sourceTree = "<group>"; };
 		98056B3047C8E9486B041995 /* WatchPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlayer.swift; sourceTree = "<group>"; };
 		98913E2AE1777903CEF0FDAF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		9C4276ABED593A1B47F0F329 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
@@ -260,6 +264,7 @@
 				31E0B10C0BD079320DCE92EC /* FillerVerbosityTests.swift */,
 				038B20E730010B6AE481AE43 /* FireMarkerStoreTests.swift */,
 				E917AA69214DB849B9A5E0CB /* FirePollerTests.swift */,
+				2EDADFB3EF44575BDBCE3E83 /* FireSyncCoordinatorTests.swift */,
 				BB75BA5E71A46E5A98022592 /* FireSyncServiceTests.swift */,
 				08ADD302F2DAF6BD8DECCB71 /* HarnessFallbackTests.swift */,
 				7DF1E71B02F9D2626B26AD3A /* LocalSpeakerSpeakableTests.swift */,
@@ -459,6 +464,7 @@
 				A7D4A857EE6B998B13E5B8E2 /* FillerPhrases.swift */,
 				658C203E2EC20B498BAD0D2C /* FireMarkerStore.swift */,
 				EEEE0A4BA481F84C56EB0400 /* FirePoller.swift */,
+				961846E67145383FBAA3A13A /* FireSyncCoordinator.swift */,
 				793F953CBECE1D9D21DF06CE /* FireSyncService.swift */,
 				8E038B022A79A275C21BB70B /* HermesVoiceAPI.swift */,
 				F10E963463B97606F132C982 /* LiveActivityController.swift */,
@@ -669,6 +675,7 @@
 				E4D5DC21FD8733F79717DD73 /* FillerPhrases.swift in Sources */,
 				A820282BDA016EBA728DF64F /* FireMarkerStore.swift in Sources */,
 				6C7186F7FE9FB4AE8875351E /* FirePoller.swift in Sources */,
+				3E83174477A54B55B8BA80BF /* FireSyncCoordinator.swift in Sources */,
 				AD5D0BCEDEE66F7E42FAE897 /* FireSyncService.swift in Sources */,
 				15148B8107ACE29F3540A0EF /* HermesActivityAttributes.swift in Sources */,
 				46C818DC6D454855A645307D /* HermesVoiceAPI.swift in Sources */,
@@ -709,6 +716,7 @@
 				D1A990C6136362088B186786 /* FillerVerbosityTests.swift in Sources */,
 				7F701200D7C6B48F5398EBFD /* FireMarkerStoreTests.swift in Sources */,
 				CA6C2AD7D73818044432163B /* FirePollerTests.swift in Sources */,
+				2910C8B4A9EE2575F38A8AC0 /* FireSyncCoordinatorTests.swift in Sources */,
 				140A3B0996D259D04CCC2A08 /* FireSyncServiceTests.swift in Sources */,
 				BAF752528DF2EE7DCE476C0E /* HarnessFallbackTests.swift in Sources */,
 				A71DBDA4A21F72808F2166CA /* LocalSpeakerSpeakableTests.swift in Sources */,

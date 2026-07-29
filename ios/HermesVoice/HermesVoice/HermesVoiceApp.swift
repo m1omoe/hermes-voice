@@ -25,6 +25,10 @@ struct HermesVoiceApp: App {
         if settings.notificationsEnabled {
             NotificationManager.shared.registerForRemoteNotifications()
         }
+        // Builds the one shared FireSyncService (FirePoller + stores) used by
+        // both the background BGAppRefreshTask handler and the foreground
+        // scenePhase/timer loop — see FireSyncCoordinator's doc comment.
+        FireSyncCoordinator.shared.configure(settings: settings)
     }
 
     var body: some Scene {
