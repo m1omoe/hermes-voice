@@ -37,6 +37,14 @@ final class NotificationManager: NSObject, ObservableObject {
     /// binds a client to a specific backend snapshot, not one shared instance.
     private let makeRegistrar: (_ baseURL: String, _ authToken: String) -> DeviceRegistering
 
+    /// Where a fire's full text / display name are looked up by (scheduleId,
+    /// fireId) once a notification's userInfo is parsed — the notification
+    /// body itself is deliberately generic (local-notifications-spec, "Arrival
+    /// behaviour"). Defaults to the real UserDefaults-backed store; tests
+    /// inject one bound to the same suite as their `AppSettings`/
+    /// `FireSyncService` fakes, mirroring `makeRegistrar`'s injection pattern.
+    private let pendingArrivals: PendingArrivalStore
+
     private var registrationInFlight = false
     /// The token each backend ACTUALLY holds, keyed by backend URL — distinct
     /// from `settings.lastApnsToken`, which is the single last token RECEIVED
@@ -72,22 +80,45 @@ final class NotificationManager: NSObject, ObservableObject {
 
     struct ScheduledArrival: Equatable {
         let scheduleId: String
+        /// Scheduler-generated, always non-empty on a current-format
+        /// notification — the key `PendingArrivalStore` records are looked up
+        /// by, alongside `scheduleId`.
+        let fireId: String
+        /// The backend profile this fire actually ran against. Never inferred
+        /// from the active profile — a fire's origin doesn't change when the
+        /// user later switches servers.
+        let profileId: UUID?
+        /// Empty means "not resumable" — never call `resume(sessionId:)` with
+        /// an empty string.
         let sessionId: String
+        /// The schedule's display name, snapshotted at fire time. Looked up
+        /// from `PendingArrivalStore`; nil when the fire is no longer pending
+        /// (already consumed, or store was trimmed).
+        let displayName: String?
+        /// The full reply text — what auto-play speaks and Live Activity
+        /// shows. Never the generic notification body. nil when the fire is
+        /// no longer in `PendingArrivalStore`.
+        let fullText: String?
         let body: String
         let receivedAt: Date
         let wasForeground: Bool
     }
 
-    /// - Parameter makeRegistrar: registration-client factory, defaulting to the
-    ///   real `HermesVoiceAPI` construction the flows previously did inline.
-    ///   Tests inject a fake; `shared` uses the default so production is
-    ///   unchanged.
+    /// - Parameters:
+    ///   - makeRegistrar: registration-client factory, defaulting to the
+    ///     real `HermesVoiceAPI` construction the flows previously did inline.
+    ///     Tests inject a fake; `shared` uses the default so production is
+    ///     unchanged.
+    ///   - pendingArrivals: full-text/display-name lookup for parsed arrivals,
+    ///     defaulting to the real UserDefaults-backed store.
     init(
         makeRegistrar: @escaping (_ baseURL: String, _ authToken: String) -> DeviceRegistering = {
             HermesVoiceAPI(baseURL: $0, authToken: $1)
-        }
+        },
+        pendingArrivals: PendingArrivalStore = PendingArrivalStore()
     ) {
         self.makeRegistrar = makeRegistrar
+        self.pendingArrivals = pendingArrivals
         super.init()
         UNUserNotificationCenter.current().delegate = self
     }
@@ -105,9 +136,48 @@ final class NotificationManager: NSObject, ObservableObject {
     }
 
     /// Clear the pending scheduled-arrival badge (after the user taps it to
-    /// route into the session, or otherwise dismisses it).
+    /// route into the session, or otherwise dismisses it). Does NOT remove
+    /// the arrival from `PendingArrivalStore` — a routing-affecting profile
+    /// switch dismisses the badge this way without discarding a still-
+    /// actionable cross-profile arrival. Use `consumeArrival(_:)` once an
+    /// arrival has actually been acted on.
     func clearArrival() {
         lastScheduledArrival = nil
+    }
+
+    /// Marks `arrival` as fully handled — resumed, its result shown, or its
+    /// origin profile switched to and continued. Removes it from
+    /// `PendingArrivalStore` (so `reconstructArrivalIfNeeded()` can't
+    /// resurrect it on a later launch) and clears the badge if `arrival` is
+    /// still the one displayed.
+    func consumeArrival(_ arrival: ScheduledArrival) {
+        pendingArrivals.remove(ids: ["\(arrival.scheduleId)-\(arrival.fireId)"])
+        if lastScheduledArrival == arrival {
+            lastScheduledArrival = nil
+        }
+    }
+
+    /// Rebuilds the badge from the newest persisted arrival. An ordinary
+    /// app-icon launch never runs `willPresent`/`didReceive`, so without this
+    /// a background-posted notification the user never taps would otherwise
+    /// reconstruct nothing (local-notifications-spec, "Arrivals must survive
+    /// an ordinary app-icon launch"). No-op when a badge is already showing
+    /// or nothing is pending; `PendingArrivalStore.all()` returns oldest-
+    /// first, so the newest is the last element.
+    func reconstructArrivalIfNeeded() {
+        guard lastScheduledArrival == nil else { return }
+        guard let newest = pendingArrivals.all().last else { return }
+        lastScheduledArrival = ScheduledArrival(
+            scheduleId: newest.scheduleId,
+            fireId: newest.fireId,
+            profileId: newest.profileId,
+            sessionId: newest.sessionId ?? "",
+            displayName: newest.displayName,
+            fullText: newest.fullText,
+            body: "",
+            receivedAt: newest.completedAt,
+            wasForeground: false
+        )
     }
 
     /// Best-effort stop of an in-flight scheduled-fire auto-play (chime and/or
@@ -334,11 +404,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         let arrival = parseArrival(from: notification, wasForeground: true)
         if let arrival {
             lastScheduledArrival = arrival
-            // Only auto-play when the user isn't mid-conversation (don't fight
-            // the live turn's player/session) and no other arrival is playing;
-            // otherwise fall through to the banner.
-            let idle = (conversation?.state ?? .idle) == .idle
-            if (settings?.autoPlayScheduledFires ?? true) && idle && !arrivalInFlight {
+            if shouldAutoPlay(arrival) {
                 // Set BEFORE spawning: `stopForegroundPlayback()` can race the
                 // task's startup, and reading `arrivalInFlight` before the
                 // spawned task has actually run would no-op the stop.
@@ -350,8 +416,21 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
                 return
             }
         }
-        // Non-schedule notifications, auto-play disabled, or busy: show the banner.
+        // Non-schedule notifications, no full text yet, cross-profile, auto-play
+        // disabled, or busy: show the banner instead.
         completionHandler([.banner, .sound, .list])
+    }
+
+    /// Same-profile + idle + auto-play-enabled + fullText available + nothing
+    /// else already playing. A cross-profile arrival, or one whose fireId
+    /// isn't (or is no longer) in `PendingArrivalStore`, always falls through
+    /// to the banner (local-notifications-spec, "Arrival behaviour": same-
+    /// profile gets the full experience, cross-profile never auto-plays).
+    private func shouldAutoPlay(_ arrival: ScheduledArrival) -> Bool {
+        guard let fullText = arrival.fullText, !fullText.isEmpty else { return false }
+        guard let settings, arrival.profileId == settings.activeBackendProfile.id else { return false }
+        let idle = (conversation?.state ?? .idle) == .idle
+        return settings.autoPlayScheduledFires && idle && !arrivalInFlight
     }
 
     /// Tap from a backgrounded / locked notification. We open the app
@@ -370,15 +449,43 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     private func parseArrival(
         from notification: UNNotification, wasForeground: Bool
     ) -> ScheduledArrival? {
-        let info = notification.request.content.userInfo
-        guard let scheduleId = info["schedule_id"] as? String,
-              let sessionId = info["session_id"] as? String else {
+        parseArrival(
+            userInfo: notification.request.content.userInfo,
+            body: notification.request.content.body,
+            wasForeground: wasForeground
+        )
+    }
+
+    /// The actual parsing logic, factored out of `UNNotification` extraction
+    /// so it's directly testable — `UNNotification` has no public initializer,
+    /// so tests can't construct one to drive `willPresent`/`didReceive`
+    /// end-to-end. Internal (not private), mirroring `handleAPNsToken(hex:)`'s
+    /// same rationale.
+    ///
+    /// A fireId no longer (or never) present in `PendingArrivalStore` still
+    /// produces an arrival — `displayName`/`fullText` come back nil rather
+    /// than dropping the notification, so a store trimmed past `maxCount` or
+    /// hit by a race still surfaces a (less rich) badge instead of nothing.
+    func parseArrival(
+        userInfo: [AnyHashable: Any], body: String, wasForeground: Bool
+    ) -> ScheduledArrival? {
+        guard let scheduleId = userInfo["schedule_id"] as? String else {
             return nil
+        }
+        let fireId = userInfo["fire_id"] as? String ?? ""
+        let sessionId = userInfo["session_id"] as? String ?? ""
+        let profileId = (userInfo["profile_id"] as? String).flatMap(UUID.init(uuidString:))
+        let pending = pendingArrivals.all().first {
+            $0.scheduleId == scheduleId && $0.fireId == fireId
         }
         return ScheduledArrival(
             scheduleId: scheduleId,
+            fireId: fireId,
+            profileId: profileId,
             sessionId: sessionId,
-            body: notification.request.content.body,
+            displayName: pending?.displayName,
+            fullText: pending?.fullText,
+            body: body,
             receivedAt: Date(),
             wasForeground: wasForeground,
         )
@@ -398,16 +505,19 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         // the whole pre-chime window.)
         guard !Task.isCancelled else { return }
         // Play the chime (if enabled), then re-synthesize TTS for the reply and
-        // play it. Gated to idle in willPresent, so we own the audio session +
-        // Live Activity here without fighting the conversation player.
-        guard let settings else { return }
+        // play it. Gated to idle + same-profile + fullText-present in
+        // `shouldAutoPlay` (willPresent), so we own the audio session + Live
+        // Activity here without fighting the conversation player, and can bind
+        // the ORIGIN profile's own url/token rather than whatever is active.
+        guard let settings, let fullText = arrival.fullText, !fullText.isEmpty else { return }
+        guard let profile = settings.backendProfiles.first(where: { $0.id == arrival.profileId }) else { return }
         // Hold the session across chime → reply so they don't churn it between
         // them; the leaf players nest their own (ref-counted) holds.
         AudioSessionCoordinator.shared.acquire(.playback)
         // Surface the reply on the lock screen / Dynamic Island for the
         // duration of playback — this is exactly when the phone is likely
-        // locked or pocketed.
-        LiveActivityController.shared.showSpeaking(detail: arrival.body)
+        // locked or pocketed. The reply text, never the generic body.
+        LiveActivityController.shared.showSpeaking(detail: fullText)
         defer {
             LiveActivityController.shared.finish()
             AudioSessionCoordinator.shared.release()
@@ -421,15 +531,55 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
 
         // Replay via the existing /api/replay endpoint — this re-synthesizes
         // the reply text fresh (push body is text, not the original audio).
-        let api = HermesVoiceAPI(baseURL: settings.backendURL, authToken: settings.authToken)
+        // Bound to the ORIGIN profile (guaranteed == active here, since
+        // `shouldAutoPlay` only allows same-profile arrivals through) rather
+        // than live `settings`, so this never drifts onto a different backend.
+        let api = HermesVoiceAPI(baseURL: profile.url, authToken: profile.authToken)
         do {
-            let path = try await api.replayAudio(text: arrival.body, voiceId: settings.selectedVoiceId)
+            let path = try await api.replayAudio(text: fullText, voiceId: settings.selectedVoiceId)
             guard let url = api.makeURL(path: path) else { return }
             let player = AudioPlayer()
             arrivalPlayer = player
-            await player.play(url: url, authToken: settings.authToken)
+            await player.play(url: url, authToken: profile.authToken)
         } catch {
             print("scheduled-fire auto-play failed: \(error)")
+        }
+    }
+}
+
+// MARK: - Arrival badge decision
+
+extension NotificationManager {
+    /// Pure decision for how the scheduled-arrival badge behaves on tap,
+    /// extracted out of the view so it's independently testable
+    /// (local-notifications-spec, "Arrival behaviour": same-profile gets the
+    /// full experience, cross-profile stays actionable but never
+    /// auto-switches, a gone profile shows the retained result only).
+    enum ArrivalBadgeDecision: Equatable {
+        /// Origin profile IS the active one and the fire has a session to resume.
+        case sameProfileResumable
+        /// Origin profile IS the active one but the fire has no session id.
+        case sameProfileResult
+        /// Origin profile still exists but isn't the active one.
+        case crossProfile(originName: String, resumable: Bool)
+        /// The origin profile no longer exists (or the arrival carries no
+        /// profile id at all — an unexpected/legacy notification shape).
+        case unavailable
+
+        static func decide(
+            profileId: UUID?,
+            sessionId: String,
+            activeProfileId: UUID,
+            profiles: [BackendProfile]
+        ) -> ArrivalBadgeDecision {
+            guard let profileId, let origin = profiles.first(where: { $0.id == profileId }) else {
+                return .unavailable
+            }
+            let resumable = !sessionId.isEmpty
+            guard profileId == activeProfileId else {
+                return .crossProfile(originName: origin.name, resumable: resumable)
+            }
+            return resumable ? .sameProfileResumable : .sameProfileResult
         }
     }
 }

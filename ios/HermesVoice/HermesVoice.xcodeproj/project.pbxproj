@@ -84,6 +84,7 @@
 		DDD1F11B34F9B3926A630505 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 98913E2AE1777903CEF0FDAF /* Assets.xcassets */; };
 		E4D5DC21FD8733F79717DD73 /* FillerPhrases.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D4A857EE6B998B13E5B8E2 /* FillerPhrases.swift */; };
 		E55CFF716A03D5F3DE97E2F4 /* HermesVoiceWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4912C5CDAC7F3FE3421877C9 /* HermesVoiceWatchApp.swift */; };
+		EB0856688BE2A89D1A298DE6 /* NotificationArrivalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D616F240CA44FE444B2CCEF /* NotificationArrivalTests.swift */; };
 		F50BAB6AC1120116517B568B /* HermesVoiceWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = F4E7E039FC5FC213E5C95D08 /* HermesVoiceWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		FA56CD4C25935FB38735B2AB /* BackendBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58B9A5FC3DB9A7AB2383F5ED /* BackendBrowser.swift */; };
 		FA76068D592F804F972CB71C /* TurnStateMachineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E6EF046B91A5A67F89911C0 /* TurnStateMachineTests.swift */; };
@@ -194,6 +195,7 @@
 		98056B3047C8E9486B041995 /* WatchPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlayer.swift; sourceTree = "<group>"; };
 		98913E2AE1777903CEF0FDAF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		9C4276ABED593A1B47F0F329 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		9D616F240CA44FE444B2CCEF /* NotificationArrivalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationArrivalTests.swift; sourceTree = "<group>"; };
 		9E5656D26B4AA84AEC2D2C91 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		9FB3B7188CD4A6892599F80E /* ChimePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChimePlayer.swift; sourceTree = "<group>"; };
 		A2F53A66609042992504ECC8 /* Brand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Brand.swift; sourceTree = "<group>"; };
@@ -268,6 +270,7 @@
 				BB75BA5E71A46E5A98022592 /* FireSyncServiceTests.swift */,
 				08ADD302F2DAF6BD8DECCB71 /* HarnessFallbackTests.swift */,
 				7DF1E71B02F9D2626B26AD3A /* LocalSpeakerSpeakableTests.swift */,
+				9D616F240CA44FE444B2CCEF /* NotificationArrivalTests.swift */,
 				FCCA835B2614A1721D08E847 /* NotificationSwitchTests.swift */,
 				B76A863A7D4ED684DE27D0C8 /* PairedTurnsTests.swift */,
 				78FF874D2CBAA5B3149EACC2 /* PendingArrivalStoreTests.swift */,
@@ -720,6 +723,7 @@
 				140A3B0996D259D04CCC2A08 /* FireSyncServiceTests.swift in Sources */,
 				BAF752528DF2EE7DCE476C0E /* HarnessFallbackTests.swift in Sources */,
 				A71DBDA4A21F72808F2166CA /* LocalSpeakerSpeakableTests.swift in Sources */,
+				EB0856688BE2A89D1A298DE6 /* NotificationArrivalTests.swift in Sources */,
 				228AD5591AB5A775324DDCCA /* NotificationSwitchTests.swift in Sources */,
 				97BDEFDB11F53100801333EC /* PairedTurnsTests.swift in Sources */,
 				95FB3FC0BF3505CEE3BFD994 /* PendingArrivalStoreTests.swift in Sources */,

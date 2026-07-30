@@ -10,6 +10,12 @@ struct MainView: View {
     @State private var activeSheet: ActiveSheet?
     @State private var textInput = ""
     @State private var typingMode = false
+    // Scheduled-arrival badge follow-ups that need more than a tap-and-go:
+    // a same-profile result with nothing to resume, or an unavailable-profile
+    // arrival, shows its full text in an alert; a cross-profile arrival offers
+    // an explicit "Switch & continue" confirmation. Both are `nil` at rest.
+    @State private var arrivalResultArrival: NotificationManager.ScheduledArrival?
+    @State private var pendingSwitchArrival: NotificationManager.ScheduledArrival?
 
     // One sheet at a time. Multiple `.sheet(isPresented:)` modifiers stacked on
     // a single view shadow each other (History stopped opening once the
@@ -26,9 +32,11 @@ struct MainView: View {
 
                 VStack(spacing: 0) {
                     if conversation.state == .idle, let arrival = notifications.lastScheduledArrival {
-                        ScheduledArrivalBadge(arrival: arrival) {
-                            conversation.resume(sessionId: arrival.sessionId)
-                            notifications.clearArrival()
+                        ScheduledArrivalBadge(
+                            arrival: arrival,
+                            decision: arrivalDecision(for: arrival)
+                        ) {
+                            handleArrivalTap(arrival)
                         }
                         .padding(.horizontal, 14)
                         .padding(.top, 6)
@@ -110,11 +118,21 @@ struct MainView: View {
                 switch newPhase {
                 case .active:
                     FireSyncCoordinator.shared.appDidBecomeActive()
+                    // App-icon-launch reconstruction: a background-posted
+                    // notification the user never tapped never ran willPresent/
+                    // didReceive, so without this the badge would stay empty
+                    // forever. No-op once a badge is already showing.
+                    notifications.reconstructArrivalIfNeeded()
                 case .background:
                     FireSyncCoordinator.shared.appDidEnterBackground()
                 default:
                     FireSyncCoordinator.shared.stopForegroundPolling()
                 }
+            }
+            .onAppear {
+                // Covers cold launch: `.onChange(of: scenePhase)` doesn't fire
+                // for the initial value, only subsequent transitions.
+                notifications.reconstructArrivalIfNeeded()
             }
             .alert("Conversation mode", isPresented: Binding(
                 get: { conversationMode.errorMessage != nil },
@@ -123,6 +141,30 @@ struct MainView: View {
                 Button("OK", role: .cancel) { conversationMode.errorMessage = nil }
             } message: {
                 Text(conversationMode.errorMessage ?? "")
+            }
+            .alert("Scheduled update", isPresented: Binding(
+                get: { arrivalResultArrival != nil },
+                set: { if !$0 { dismissArrivalResult() } }
+            )) {
+                Button("OK") { dismissArrivalResult() }
+            } message: {
+                Text(arrivalResultMessage)
+            }
+            .confirmationDialog(
+                crossProfileTitle,
+                isPresented: Binding(
+                    get: { pendingSwitchArrival != nil },
+                    set: { if !$0 { pendingSwitchArrival = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Switch & continue") {
+                    if let arrival = pendingSwitchArrival { switchAndContinue(arrival) }
+                    pendingSwitchArrival = nil
+                }
+                Button("Cancel", role: .cancel) { pendingSwitchArrival = nil }
+            } message: {
+                Text(crossProfileMessage)
             }
         }
         .overlay(alignment: .bottom) {
@@ -240,6 +282,85 @@ struct MainView: View {
         BackendRouting.applySideEffects(previous: previous, endpointChanged: true)
     }
 
+    // MARK: - Scheduled-arrival badge
+
+    /// The pure same-profile / cross-profile / unavailable decision for
+    /// `arrival`, evaluated against the CURRENT active profile every render
+    /// (never cached) — see `NotificationManager.ArrivalBadgeDecision`.
+    private func arrivalDecision(for arrival: NotificationManager.ScheduledArrival) -> NotificationManager.ArrivalBadgeDecision {
+        NotificationManager.ArrivalBadgeDecision.decide(
+            profileId: arrival.profileId,
+            sessionId: arrival.sessionId,
+            activeProfileId: settings.activeBackendProfile.id,
+            profiles: settings.backendProfiles
+        )
+    }
+
+    /// Routes a badge tap by the pure decision: resume in place, show the
+    /// retained result, or offer an explicit cross-profile switch. Never
+    /// switches automatically (local-notifications-spec, "Arrival behaviour").
+    private func handleArrivalTap(_ arrival: NotificationManager.ScheduledArrival) {
+        switch arrivalDecision(for: arrival) {
+        case .sameProfileResumable:
+            conversation.resume(sessionId: arrival.sessionId)
+            notifications.consumeArrival(arrival)
+        case .sameProfileResult, .unavailable:
+            arrivalResultArrival = arrival
+        case .crossProfile:
+            pendingSwitchArrival = arrival
+        }
+    }
+
+    /// Dismisses the result alert and marks the arrival consumed — once shown,
+    /// there's nothing further actionable, so it shouldn't resurrect via
+    /// `reconstructArrivalIfNeeded()` on a later launch.
+    private func dismissArrivalResult() {
+        guard let arrival = arrivalResultArrival else { return }
+        notifications.consumeArrival(arrival)
+        arrivalResultArrival = nil
+    }
+
+    private var arrivalResultMessage: String {
+        guard let arrival = arrivalResultArrival else { return "" }
+        guard case .unavailable = arrivalDecision(for: arrival) else {
+            return arrival.fullText ?? "No result text is available for this update."
+        }
+        let text = arrival.fullText ?? "No result text is available for this update."
+        return "\(text)\n\nThat server is no longer configured."
+    }
+
+    private var crossProfileTitle: String {
+        guard let arrival = pendingSwitchArrival,
+              case .crossProfile(let originName, _) = arrivalDecision(for: arrival)
+        else { return "" }
+        return "Update from \(originName)"
+    }
+
+    private var crossProfileMessage: String {
+        guard let arrival = pendingSwitchArrival else { return "" }
+        return arrival.fullText ?? "Switch servers to see this update."
+    }
+
+    /// Applies the shared switch orchestration (same gate + teardown as the
+    /// header picker), then resumes the origin session if resumable, and
+    /// marks the arrival consumed. Guarded by `canSwitchBackendProfile` so an
+    /// already-open confirmation can't apply after a live turn/hands-free/
+    /// Watch relay started underneath it — same defensive re-check
+    /// `selectBackendProfile` does.
+    private func switchAndContinue(_ arrival: NotificationManager.ScheduledArrival) {
+        guard canSwitchBackendProfile else { return }
+        guard let originId = arrival.profileId,
+              settings.backendProfiles.contains(where: { $0.id == originId })
+        else { return }
+        let previous = settings.activeBackendProfile
+        guard conversation.switchBackend(to: originId) else { return }
+        BackendRouting.applySideEffects(previous: previous, endpointChanged: true)
+        if !arrival.sessionId.isEmpty {
+            conversation.resume(sessionId: arrival.sessionId)
+        }
+        notifications.consumeArrival(arrival)
+    }
+
     /// "New conversation" is available only at rest (idle/error) and only when
     /// there's actually a thread to clear — resetting an empty one is a no-op.
     private var canStartNewConversation: Bool {
@@ -331,11 +452,30 @@ struct ScrollbackRail: View {
 // MARK: - Scheduled-arrival badge
 
 /// Surfaces the most-recent scheduled-fire notification while the app is at
-/// rest. Tapping resumes that Hermes session so the user can continue it.
-/// Shown only in `.idle` so it never covers an active turn.
+/// rest. Tapping routes through `handleArrivalTap` (resume / show result /
+/// offer a cross-profile switch) per `decision`. Shown only in `.idle` so it
+/// never covers an active turn.
 private struct ScheduledArrivalBadge: View {
     let arrival: NotificationManager.ScheduledArrival
+    let decision: NotificationManager.ArrivalBadgeDecision
     let onTap: () -> Void
+
+    private var title: String {
+        arrival.displayName?.isEmpty == false ? arrival.displayName! : "SCHEDULED UPDATE"
+    }
+
+    private var subtitle: String {
+        switch decision {
+        case .sameProfileResumable:
+            return arrival.fullText ?? "Tap to continue."
+        case .sameProfileResult:
+            return arrival.fullText ?? "Tap to view the result."
+        case .crossProfile(let originName, _):
+            return "From \(originName) — tap to switch"
+        case .unavailable:
+            return "That server is no longer configured."
+        }
+    }
 
     var body: some View {
         Button(action: onTap) {
@@ -344,11 +484,11 @@ private struct ScheduledArrivalBadge: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(HVColor.gold)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("SCHEDULED UPDATE")
+                    Text(title.uppercased())
                         .font(HVFont.micro.weight(.semibold))
                         .tracking(1.0)
                         .foregroundStyle(HVColor.gold)
-                    Text(arrival.body)
+                    Text(subtitle)
                         .font(HVFont.captionTiny)
                         .foregroundStyle(HVColor.cream)
                         .lineLimit(2)
