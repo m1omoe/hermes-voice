@@ -1,0 +1,48 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/HermesVoice/project.yml --project ios/HermesVoice
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project ios/HermesVoice/HermesVoice.xcodeproj \
+            -scheme HermesVoice \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/HermesVoice.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tail -20
+
+      - name: Package unsigned IPA
+        run: |
+          APP=$(find build/HermesVoice.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          echo "Packaging $APP"
+          test -d "$APP/Watch" && ls "$APP/Watch" || echo "WARNING: no embedded Watch app found"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry HermesVoice-unsigned.ipa Payload
+          ls -lh HermesVoice-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HermesVoice-unsigned-ipa
+          path: HermesVoice-unsigned.ipa
+          retention-days: 14
