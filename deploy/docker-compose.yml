@@ -1,0 +1,29 @@
+# Deploy on Feiniu fnOS: put this folder at /vol1/1000/docker/hermes-voice
+# then: docker compose up -d --build
+# The app reaches it over Tailscale at http://<feiniu-tailscale-ip>:8765
+services:
+  hermes-voice:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        WITH_LOCAL_SPEECH: "1"
+    image: hermes-voice-backend:latest
+    container_name: hermes-voice
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # Shared secret the app must present (set the same value in the app's
+      # server profile when pairing). Generate: openssl rand -hex 24
+      HERMES_VOICE_TOKEN: "${HERMES_VOICE_TOKEN:?set HERMES_VOICE_TOKEN in .env}"
+      # Local speech, no API keys. Whisper model MUST be a multilingual one
+      # for Chinese — the upstream default base.en is English-only.
+      # small = fast/~0.5GB; bump to medium for better Chinese accuracy.
+      STT_PROVIDER: "local_whisper"
+      LOCAL_WHISPER_MODEL: "${LOCAL_WHISPER_MODEL:-small}"
+      TTS_PROVIDER: "local_piper"
+      PIPER_VOICE_PATH: "/opt/piper-voices/zh_CN-huayan-medium.onnx"
+    volumes:
+      - ./data:/root/.hermes-voice
+      - ./hf-cache:/root/.cache/huggingface
