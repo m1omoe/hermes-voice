@@ -54,5 +54,11 @@ class PiperTTS:
     def _synthesize_sync(self, text: str) -> TTSResult:
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wav:
-            self._voice.synthesize(text, wav)
+            # piper-tts >= 1.3 changed synthesize() into an AudioChunk
+            # generator; synthesize_wav() is the wav-writing API and sets
+            # the wave format itself. Older 1.2 only has synthesize(text, wav).
+            if hasattr(self._voice, "synthesize_wav"):
+                self._voice.synthesize_wav(text, wav)
+            else:
+                self._voice.synthesize(text, wav)
         return TTSResult(audio=buf.getvalue(), mime="audio/wav", extension=".wav")
